@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Node 24 LTS is the authoritative runtime target: it is what the container
+  # runs and what this job verifies against.
+  NODE_VERSION: '24'
+  GITLEAKS_VERSION: '8.24.3'
+  GITLEAKS_SHA256: '9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # THE blocking foundation job.
+  #
+  # It runs `scripts/ci-verify.sh` - the same script the local pre-commit and
+  # pre-push gates run - so the local and remote verification contracts cannot
+  # drift apart. The script itself asserts a minimum executed-test count and
+  # that every test suite contributed, so an empty or truncated run cannot pass
+  # as green.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout (full history for the secret-history scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Report toolchain
+        run: |
+          set -euo pipefail
+          echo "node:   $(node --version)"
+          echo "npm:    $(npm --version)"
+          echo "docker: $(docker --version)"
+          echo "commit: ${GITHUB_SHA}"
+
+      - name: Install gitleaks (pinned version, checksum verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks.tgz "${url}"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run the ETBZ verification contract
+        env:
+          # The image build is provenance-gated: it fails closed unless a real
+          # 40-character revision is supplied.
+          ETBZ_REVISION: ${{ github.sha }}
+          ETBZ_SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: bash scripts/ci-verify.sh
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etbz-verification-report
+          path: .etbz-verify/
+          if-no-files-found: warn
+          retention-days: 14

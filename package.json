@@ -1,0 +1,42 @@
+{
+  "name": "etbz-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ETBZ service foundation (ETBZ-9): liveness, configuration readiness, architecture boundaries. No business pipeline.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0 <25"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:negative": "vitest run tests/negative",
+    "test:contract": "vitest run tests/contract",
+    "test:architecture": "vitest run tests/architecture",
+    "guards": "bash scripts/verify-guards.sh",
+    "secret-scan": "bash scripts/secret-scan.sh",
+    "deps:scan": "npm audit --audit-level=high --omit=dev",
+    "build-dry-run": "bash scripts/build-dry-run.sh",
+    "verify": "bash scripts/ci-verify.sh"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.3.0",
+    "@types/supertest": "^6.0.2",
+    "js-yaml": "^4.1.0",
+    "supertest": "^7.1.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

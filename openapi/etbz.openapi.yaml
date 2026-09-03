@@ -1,0 +1,160 @@
+openapi: 3.1.0
+info:
+  title: ETBZ Service
+  version: 0.1.0
+  summary: ETBZ service foundation (ETBZ-9).
+  description: |
+    Foundation surface only.
+
+    This document describes the COMPLETE public HTTP surface of the ETBZ service
+    as of ETBZ-9: liveness and a single readiness capability. There is no
+    business surface in this slice - no orders, no webhooks, no rendering, no
+    delivery - and no such path may be added here without the slice that
+    implements it.
+
+    The path set below is verified against the live Express router and against
+    the route registry in `src/http/routes/index.ts` by `tests/contract/`.
+    Adding an undocumented route, or documenting a route that is not served,
+    fails that gate.
+  license:
+    name: UNLICENSED
+    identifier: LicenseRef-Proprietary
+
+servers:
+  - url: http://localhost:8120
+    description: Local foundation runtime (default ETBZ_PORT)
+
+tags:
+  - name: foundation
+    description: Liveness and readiness of the ETBZ service foundation.
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [foundation]
+      summary: Liveness probe
+      description: |
+        Reports that the process is running and able to serve HTTP.
+
+        This is LIVENESS ONLY. It asserts nothing about configuration, FuFirE,
+        a database, Etsy, PDF rendering, delivery, or production readiness, and
+        it answers 200 even while the configuration is invalid so that a
+        misconfigured container stays observable.
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                alive:
+                  value:
+                    status: alive
+
+  /ready:
+    get:
+      operationId: getReadiness
+      tags: [foundation]
+      summary: Readiness probe for the configuration capability
+      description: |
+        Reports whether the foundation capabilities activated in ETBZ-9 are
+        satisfied. Exactly one capability is active: `configuration`.
+
+        Fail-closed: a missing or malformed mandatory configuration variable
+        yields 503. The response carries environment variable NAMES and static
+        expectations only - never a configuration value.
+      responses:
+        '200':
+          description: All activated foundation capabilities are satisfied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessReport'
+              examples:
+                ready:
+                  value:
+                    status: ready
+                    capabilities:
+                      - name: configuration
+                        status: ok
+        '503':
+          description: At least one activated foundation capability is not satisfied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessReport'
+              examples:
+                missingConfiguration:
+                  value:
+                    status: not_ready
+                    capabilities:
+                      - name: configuration
+                        status: fail
+                        issues:
+                          - variable: ETBZ_ENV
+                            code: missing
+                            expectation: 'one of: local | development | test | staging | production'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: alive
+          description: Liveness marker. The only value this service emits.
+
+    ConfigIssue:
+      type: object
+      additionalProperties: false
+      required: [variable, code, expectation]
+      properties:
+        variable:
+          type: string
+          description: Environment variable name. Never its value.
+          examples: [ETBZ_ENV, LOG_LEVEL, ETBZ_PORT]
+        code:
+          type: string
+          enum: [missing, invalid]
+        expectation:
+          type: string
+          description: Static, value-free description of what was expected.
+
+    CapabilityReport:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          enum: [configuration]
+          description: |
+            Capabilities activated in ETBZ-9. Exactly one. No dependency
+            capability (FuFirE, Etsy, database, PDF, delivery) is claimed.
+        status:
+          type: string
+          enum: [ok, fail]
+        issues:
+          type: array
+          description: Present only when `status` is `fail`.
+          items:
+            $ref: '#/components/schemas/ConfigIssue'
+
+    ReadinessReport:
+      type: object
+      additionalProperties: false
+      required: [status, capabilities]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        capabilities:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CapabilityReport'

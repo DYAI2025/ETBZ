@@ -1,0 +1,28 @@
+# --- dependencies ---
+node_modules/
+
+# --- build output ---
+dist/
+*.tsbuildinfo
+
+# --- test / coverage output ---
+coverage/
+.vitest/
+
+# --- local environment: NEVER commit real configuration values ---
+.env
+.env.*
+!.env.example
+
+# --- local agent / editor tooling state (not part of the ETBZ service) ---
+.claude/
+.idea/
+.vscode/
+
+# --- transient verification output (evidence is written here at runtime) ---
+docs/evidence/run/
+.etbz-verify/
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db

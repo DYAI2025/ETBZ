@@ -1,0 +1,24 @@
+# =============================================================================
+# ETBZ secret scanning configuration.
+#
+# Extends the upstream gitleaks default ruleset rather than replacing it, so the
+# service inherits new detections when the scanner is upgraded. Only paths that
+# cannot contain authored secrets are excluded, and no rule is disabled.
+#
+# `.env.example` is NOT excluded: it must stay free of real values, and the
+# scanner is the check that keeps it so.
+# =============================================================================
+title = "ETBZ secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated and vendored paths that contain no authored ETBZ content."
+paths = [
+  '''^node_modules/''',
+  '''^dist/''',
+  '''^coverage/''',
+  '''^\.git/''',
+  '''^package-lock\.json$''',
+]

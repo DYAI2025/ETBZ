@@ -1,0 +1,32 @@
+# Keep the build context minimal, deterministic and secret-free.
+# Anything not listed as required for `npm ci` + `tsc` must not enter the context.
+
+.git
+.github
+.gitignore
+.editorconfig
+.dockerignore
+
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# environment files must never enter the image build context
+.env
+.env.*
+.env.example
+
+# local agent/editor tooling state
+.claude
+.idea
+.vscode
+
+# verification-only assets: not needed to build the runtime artifact
+tests
+scripts
+docs
+openapi
+contracts
+vitest.config.ts
+README.md

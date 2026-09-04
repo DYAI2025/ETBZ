@@ -68,7 +68,13 @@ verify_lockfile_present() {
 # --- 2. typecheck -------------------------------------------------------------
 run_typecheck() { npm run --silent typecheck; }
 
-# --- 3. tests -----------------------------------------------------------------
+# --- 3. lint ------------------------------------------------------------------
+# Defect-detection lint, type-aware. Deliberately NOT a second spelling of the
+# typecheck: `scripts/verify-guards.sh` proves the point by writing a file that
+# `tsc --noEmit` accepts and this gate rejects.
+run_lint() { npm run --silent lint; }
+
+# --- 4. tests -----------------------------------------------------------------
 run_tests() {
   mkdir -p "$(dirname "${TEST_REPORT}")"
   npx vitest run --reporter=default --reporter=json --outputFile="${TEST_REPORT}"
@@ -99,7 +105,7 @@ assert_test_count() {
   ' "${MINIMUM_TEST_COUNT}" "${TEST_REPORT}"
 }
 
-# --- 4. build -----------------------------------------------------------------
+# --- 5. build -----------------------------------------------------------------
 run_build() { npm run --silent build; }
 
 assert_build_output() {
@@ -108,13 +114,13 @@ assert_build_output() {
   echo "build output present: $(find "${REPO_ROOT}/dist" -name '*.js' | wc -l | tr -d ' ') javascript files"
 }
 
-# --- 5. guards ----------------------------------------------------------------
+# --- 6. guards ----------------------------------------------------------------
 run_guard_mutations() { bash "${REPO_ROOT}/scripts/verify-guards.sh"; }
 
-# --- 6. secret gate -----------------------------------------------------------
+# --- 7. secret gate -----------------------------------------------------------
 run_secret_gate() { bash "${REPO_ROOT}/scripts/secret-scan.sh"; }
 
-# --- 7. dependency risk -------------------------------------------------------
+# --- 8. dependency risk -------------------------------------------------------
 run_dependency_scan() {
   # Runtime dependencies are blocking at `high`; the full tree is reported for
   # visibility without blocking on dev-only advisories.
@@ -126,19 +132,20 @@ report_full_dependency_audit() {
   return 0
 }
 
-# --- 8. docker ----------------------------------------------------------------
+# --- 9. docker ----------------------------------------------------------------
 run_build_dry_run() { bash "${REPO_ROOT}/scripts/build-dry-run.sh"; }
 
 # --- execution ----------------------------------------------------------------
 etbz_step "install gate :: lockfile committed" verify_lockfile_present
 etbz_step "install gate :: npm ci (deterministic install)" install_dependencies
 etbz_step "typecheck :: tsc --noEmit (strict)" run_typecheck
+etbz_step "lint :: eslint (type-aware defect rules, zero warnings)" run_lint
 etbz_step "tests :: vitest run (all suites)" run_tests
 etbz_step "tests :: executed-count and suite-coverage assertion" assert_test_count
 etbz_step "build :: tsc -p tsconfig.build.json" run_build
 etbz_step "build :: output assertion" assert_build_output
 if [ "${RUN_MUTATIONS}" -eq 1 ]; then
-  etbz_step "guards :: architecture + contract mutation proofs" run_guard_mutations
+  etbz_step "guards :: architecture + contract + lint mutation proofs" run_guard_mutations
 fi
 etbz_step "security :: secret scan + scanner mutation proof" run_secret_gate
 etbz_step "security :: dependency risk scan (runtime tree, high+)" run_dependency_scan

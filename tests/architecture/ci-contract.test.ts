@@ -92,6 +92,7 @@ describe('AC8: the verification contract still contains every mandatory gate', (
   it.each([
     ['install gate', /npm ci/],
     ['typecheck', /typecheck/],
+    ['lint', /npm run --silent lint|run_lint/],
     ['tests', /vitest run/],
     ['build', /npm run --silent build|run_build/],
     ['guard mutation proofs', /verify-guards\.sh/],

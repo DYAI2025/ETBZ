@@ -11,6 +11,9 @@
 #   C  undocumented route mounted on the app         -> contract guard red
 #   D  business schema in contracts/                 -> architecture guard red
 #   E  package.json / package-lock.json drift        -> install gate red
+#   F  discarded promise rejection in src/app        -> lint gate red
+#      (while `tsc --noEmit` stays GREEN on the same file, which is the
+#       proof that lint is not a second spelling of the typecheck)
 #
 # Every mutation is removed by an EXIT trap, so an interrupted run cannot leave
 # the working tree dirty.
@@ -26,11 +29,13 @@ cd "${REPO_ROOT}"
 MUTATION_DOMAIN_FILE="${REPO_ROOT}/src/domain/__mutation_forbidden_import__.ts"
 MUTATION_APPLICATION_FILE="${REPO_ROOT}/src/application/__mutation_layer_escape__.ts"
 MUTATION_CONTRACT_FILE="${REPO_ROOT}/contracts/__mutation_order_schema__.json"
+MUTATION_LINT_FILE="${REPO_ROOT}/src/app/__mutation_floating_promise__.ts"
 APP_FILE="${REPO_ROOT}/src/http/app.ts"
 BACKUP_DIR="$(mktemp -d)"
 
 revert_all() {
-  rm -f "${MUTATION_DOMAIN_FILE}" "${MUTATION_APPLICATION_FILE}" "${MUTATION_CONTRACT_FILE}"
+  rm -f "${MUTATION_DOMAIN_FILE}" "${MUTATION_APPLICATION_FILE}" "${MUTATION_CONTRACT_FILE}" \
+        "${MUTATION_LINT_FILE}"
   if [ -f "${BACKUP_DIR}/app.ts" ]; then
     cp "${BACKUP_DIR}/app.ts" "${APP_FILE}"
   fi
@@ -42,6 +47,8 @@ cp "${APP_FILE}" "${BACKUP_DIR}/app.ts"
 
 run_architecture_tests() { npm run --silent test:architecture; }
 run_contract_tests()     { npm run --silent test:contract; }
+run_lint()               { npm run --silent lint; }
+run_typecheck()          { npm run --silent typecheck; }
 
 # --- mutation A ---------------------------------------------------------------
 # Written in the MULTI-LINE named-import form on purpose. A guard that matches
@@ -151,6 +158,25 @@ PY
   return "${status}"
 }
 
+# --- mutation F ---------------------------------------------------------------
+# A promise whose rejection is discarded. This is a REAL defect - in an Express
+# handler it is a silently swallowed failure - and it is invisible to the type
+# checker: the file compiles cleanly under the strict tsconfig. That asymmetry
+# is asserted explicitly below, so the lint gate cannot degenerate into a second
+# spelling of `tsc --noEmit` without this proof turning red.
+mutate_floating_promise() {
+  cat > "${MUTATION_LINT_FILE}" <<'TS'
+// TEMPORARY MUTATION - created by scripts/verify-guards.sh, never committed.
+export async function mutation(): Promise<void> {
+  await Promise.resolve();
+}
+
+export function triggerMutation(): void {
+  mutation();
+}
+TS
+}
+
 prove_clean_worktree() {
   local dirty
   dirty="$(git -C "${REPO_ROOT}" status --porcelain)"
@@ -165,7 +191,8 @@ prove_clean_worktree() {
 
 prove_mutation_files_absent() {
   local file
-  for file in "${MUTATION_DOMAIN_FILE}" "${MUTATION_APPLICATION_FILE}" "${MUTATION_CONTRACT_FILE}"; do
+  for file in "${MUTATION_DOMAIN_FILE}" "${MUTATION_APPLICATION_FILE}" "${MUTATION_CONTRACT_FILE}" \
+              "${MUTATION_LINT_FILE}"; do
     if [ -e "${file}" ]; then
       echo "MUTATION_RESIDUE: ${file} still exists" >&2
       return 1
@@ -183,6 +210,7 @@ etbz_banner "ETBZ-9 GUARD MUTATION PROOFS"
 
 etbz_step "baseline :: architecture guards green" run_architecture_tests
 etbz_step "baseline :: contract guard green" run_contract_tests
+etbz_step "baseline :: lint gate green" run_lint
 
 etbz_step "mutation A :: forbidden framework import in src/domain" mutate_domain_forbidden_import
 etbz_expect_failure "architecture guard rejects a framework import in src/domain" run_architecture_tests
@@ -210,11 +238,17 @@ etbz_step "mutation D :: business schema in contracts/" mutate_contract_business
 etbz_expect_failure "architecture guard rejects a business schema in contracts/" run_architecture_tests
 etbz_step "revert D" rm -f "${MUTATION_CONTRACT_FILE}"
 
+etbz_step "mutation F :: discarded promise rejection in src/app" mutate_floating_promise
+etbz_step "control F :: typecheck STAYS GREEN on the mutated file" run_typecheck
+etbz_expect_failure "lint gate rejects a discarded promise rejection" run_lint
+etbz_step "revert F" rm -f "${MUTATION_LINT_FILE}"
+
 etbz_expect_failure "install gate rejects package.json / lockfile drift" prove_lockfile_drift_fails_install
 
 etbz_step "proof :: all mutation artefacts removed" prove_mutation_files_absent
 etbz_step "proof :: working tree free of mutation residue" prove_clean_worktree
 etbz_step "re-baseline :: architecture guards green" run_architecture_tests
 etbz_step "re-baseline :: contract guard green" run_contract_tests
+etbz_step "re-baseline :: lint gate green" run_lint
 
 etbz_summary "ETBZ-9 GUARD MUTATION PROOFS"

@@ -146,6 +146,7 @@ both redacted, and payload fields cannot overwrite the log envelope.
 ```bash
 npm ci
 npm run typecheck
+npm run lint
 npm test
 npm run build
 
@@ -183,9 +184,10 @@ bash scripts/ci-verify.sh --skip-docker   # without BUILD_DRY_RUN
 | --- | --- |
 | install | `npm ci` — lockfile drift fails the install |
 | typecheck | `tsc --noEmit`, strict |
+| lint | `eslint`, zero warnings — **type-aware defect rules** (`no-floating-promises`, `no-misused-promises`, `await-thenable`), not a second spelling of the typecheck and not a formatting policy |
 | tests | all suites, **with a minimum executed-test count** and a per-suite assertion, so an empty run cannot pass as green |
 | build | `tsc -p tsconfig.build.json` plus an output assertion |
-| guards | architecture + contract, each with a **mutation proof** |
+| guards | architecture + contract + lint, each with a **mutation proof** |
 | secrets | gitleaks over tree and history, with a **scanner mutation proof** |
 | dependencies | `npm audit` on the runtime tree at `high` |
 | container | `BUILD_DRY_RUN` — build, provenance, non-root, image-content, runtime smoke, reproducibility, cleanup |
@@ -195,8 +197,13 @@ bash scripts/ci-verify.sh --skip-docker   # without BUILD_DRY_RUN
 A guard that has never been observed failing is not evidence of anything.
 `scripts/verify-guards.sh` injects real violations — a framework import in
 `src/domain`, a layer-escaping import in `src/application`, an undocumented
-route, a business schema in `contracts/`, lockfile drift — and **requires each
-guard to turn red** before reverting every mutation and re-proving the baseline.
+route, a business schema in `contracts/`, lockfile drift, a discarded promise
+rejection — and **requires each guard to turn red** before reverting every
+mutation and re-proving the baseline.
+
+The lint mutation carries a second assertion: `tsc --noEmit` must stay GREEN on
+the very file the lint gate rejects. Without it, "we have lint" could quietly
+degrade into running the type checker twice.
 
 `scripts/secret-scan.sh` does the same for the secret scanner, using a fixture
 created at runtime that is never committed, never pushed, and whose value is

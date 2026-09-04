@@ -29,4 +29,5 @@ docs
 openapi
 contracts
 vitest.config.ts
+eslint.config.js
 README.md

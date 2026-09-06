@@ -90,6 +90,7 @@ export interface HoroscopeDayMaster {
 
 export type HoroscopeErrorCode =
   | 'HOROSCOPE_SYMBOL_MAPPING_ERROR'
+  | 'HOROSCOPE_SYMBOL_CONTRADICTION'
   | 'HOROSCOPE_CONTRACT_CONTRADICTION'
   | 'HOROSCOPE_DAY_MASTER_CONTRADICTION'
   | 'HOROSCOPE_WUXING_VECTOR_ERROR'
@@ -114,6 +115,21 @@ function mapPillar(name: PillarName, fact: FufirePillarFact): HoroscopePillar {
       throw new HoroscopeError('HOROSCOPE_SYMBOL_MAPPING_ERROR', `${name}: ${error.message}`);
     }
     throw error;
+  }
+  // Semantic consistency oracle: the released StemFact/BranchFact values are
+  // the approved deterministic mapping. A FuFirE label that contradicts it is
+  // not repaired or replaced — the fact is rejected (ETBZ fail-closed truth).
+  if (fact.elementDe !== stem.elementDe) {
+    throw new HoroscopeError(
+      'HOROSCOPE_SYMBOL_CONTRADICTION',
+      `${name}: FuFirE element "${fact.elementDe}" contradicts released mapping for stem ${stem.name} (${stem.elementDe})`,
+    );
+  }
+  if (fact.tierDe !== branch.tierDe) {
+    throw new HoroscopeError(
+      'HOROSCOPE_SYMBOL_CONTRADICTION',
+      `${name}: FuFirE tier "${fact.tierDe}" contradicts released mapping for branch ${branch.name} (${branch.tierDe})`,
+    );
   }
   return {
     name,

@@ -157,4 +157,31 @@ describe('HoroscopeModel: fail-closed negative paths', () => {
     const drifted = wuxingFixture({ dominant: 'Aether' });
     expect(() => buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), drifted, RUNTIME)).toThrow(HoroscopeError);
   });
+
+  it('rejects a stem/element contradiction (Xin is Metall, not Holz)', () => {
+    const drifted = baziFixture({ pillars: { year: { stem: 'Xin', elementDe: 'Holz' } } });
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+      expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
+    );
+  });
+
+  it('rejects a branch/tier contradiction (Wu is Pferd, not Tiger)', () => {
+    const drifted = baziFixture({ pillars: { month: { branch: 'Wu', tierDe: 'Tiger' } } });
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+      expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
+    );
+  });
+
+  it('rejects a day-master element contradiction (day stem Xin reported as Holz)', () => {
+    const drifted = baziFixture({ pillars: { day: { stem: 'Xin', elementDe: 'Holz' } } });
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+      expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
+    );
+  });
+
+  it('passes FuFirE tier/element labels through verbatim when they agree with the mapping', () => {
+    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), RUNTIME);
+    expect(model.pillars.day.stemElementDe).toBe('Metall');
+    expect(model.pillars.day.tierDe).toBe('Schwein');
+  });
 });

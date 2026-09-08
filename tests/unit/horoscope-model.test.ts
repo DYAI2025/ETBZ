@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { buildHoroscopeModel, HoroscopeError } from '../../src/application/horoscope-model.js';
 import type { FufireBaziSnapshot, WuxingSnapshot } from '../../src/application/ports/fufire-gateway.js';
 import { validateBirthInput } from '../../src/domain/birth-input.js';
+// ETBZ-29: the natal facts are part of the same model, so every existing
+// ETBZ-24 assertion below now runs with the natal block attached. The
+// assertions themselves are unchanged — only the extra argument is new.
+import { UNKNOWN_TIME_NATAL_OVERRIDES, natalSnapshot } from '../support/natalFixture.js';
+
+const NATAL = natalSnapshot();
+const UNKNOWN_NATAL = natalSnapshot(UNKNOWN_TIME_NATAL_OVERRIDES);
 
 const RUNTIME = { runtimeImage: 'fufire-lunar@sha256:c9162edd', openapiSha256: '6c1db672' };
 
@@ -74,7 +81,7 @@ if (!UNKNOWN_INPUT_RESULT.ok) throw new Error('fixture unknown-time input must v
 
 describe('HoroscopeModel: source traceability', () => {
   it('passes FuFirE facts through and enriches stems/branches from the released mapping', () => {
-    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), RUNTIME);
+    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), NATAL, RUNTIME);
     expect(model.pillars.year.stem).toBe('Geng');
     expect(model.pillars.year.stemHanzi).toBe('庚');
     expect(model.pillars.year.branchHanzi).toBe('午');
@@ -91,7 +98,7 @@ describe('HoroscopeModel: source traceability', () => {
   });
 
   it('keeps the known-time path non-provisional when FuFirE confirms it', () => {
-    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), RUNTIME);
+    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), NATAL, RUNTIME);
     expect(model.precision.birthTimeKnown).toBe(true);
     expect(model.precision.provisionalFields).toEqual([]);
     expect(model.birth.time).toBe('14:30:00');
@@ -99,7 +106,7 @@ describe('HoroscopeModel: source traceability', () => {
 
   it('preserves unknown-time uncertainty: hour stays explicitly provisional downstream', () => {
     const unknownTime = baziFixture({ precision: { birthTimeKnown: false, provisionalFields: ['hour'] } });
-    const model = buildHoroscopeModel(UNKNOWN_INPUT_RESULT.value, unknownTime, wuxingFixture(), RUNTIME);
+    const model = buildHoroscopeModel(UNKNOWN_INPUT_RESULT.value, unknownTime, wuxingFixture(), UNKNOWN_NATAL, RUNTIME);
     expect(model.birth.birthTimeKnown).toBe(false);
     expect(model.birth.time).toBeUndefined();
     // The uncertainty survives into the model: explicit, typed, consultable.
@@ -114,24 +121,24 @@ describe('HoroscopeModel: source traceability', () => {
 
   it('fails closed when input says unknown time but FuFirE does not mark the hour provisional', () => {
     const drifted = baziFixture({ precision: { birthTimeKnown: false, provisionalFields: [] } });
-    expect(() => buildHoroscopeModel(UNKNOWN_INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+    expect(() => buildHoroscopeModel(UNKNOWN_INPUT_RESULT.value, drifted, wuxingFixture(), UNKNOWN_NATAL, RUNTIME)).toThrow(
       expect.objectContaining({ code: 'HOROSCOPE_CONTRACT_CONTRADICTION' }) as HoroscopeError,
     );
   });
 
   it('fails closed when input and FuFirE disagree about birthTimeKnown', () => {
     const drifted = baziFixture({ precision: { birthTimeKnown: false, provisionalFields: ['hour'] } });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(
       expect.objectContaining({ code: 'HOROSCOPE_CONTRACT_CONTRADICTION' }) as HoroscopeError,
     );
   });
 
   it('produces a canonical JSON string excluding the volatile timestamp', () => {
-    const a = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), RUNTIME);
+    const a = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), NATAL, RUNTIME);
     const differentTimestamp = baziFixture({
       provenance: { computationTimestamp: '2030-01-01T00:00:00+00:00' },
     });
-    const b = buildHoroscopeModel(INPUT_RESULT.value, differentTimestamp, wuxingFixture(), RUNTIME);
+    const b = buildHoroscopeModel(INPUT_RESULT.value, differentTimestamp, wuxingFixture(), NATAL, RUNTIME);
     expect(a.canonicalJson).toBe(b.canonicalJson);
   });
 });
@@ -139,48 +146,48 @@ describe('HoroscopeModel: source traceability', () => {
 describe('HoroscopeModel: fail-closed negative paths', () => {
   it('rejects an unknown stem symbol', () => {
     const drifted = baziFixture({ pillars: { year: { stem: 'Foobar' } } });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(HoroscopeError);
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(HoroscopeError);
   });
 
   it('rejects a day-master contradiction', () => {
     const drifted = baziFixture({ dayMaster: 'Ren' });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(HoroscopeError);
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(HoroscopeError);
   });
 
   it('rejects a wu-xing vector with a missing element', () => {
     const vector = { Holz: 1.8, Feuer: 2.5, Erde: 2.0, Metall: 2.0, Wasser: NaN };
     const drifted = wuxingFixture({ vector });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), drifted, RUNTIME)).toThrow(HoroscopeError);
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), drifted, NATAL, RUNTIME)).toThrow(HoroscopeError);
   });
 
   it('rejects an unknown dominant element', () => {
     const drifted = wuxingFixture({ dominant: 'Aether' });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), drifted, RUNTIME)).toThrow(HoroscopeError);
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), drifted, NATAL, RUNTIME)).toThrow(HoroscopeError);
   });
 
   it('rejects a stem/element contradiction (Xin is Metall, not Holz)', () => {
     const drifted = baziFixture({ pillars: { year: { stem: 'Xin', elementDe: 'Holz' } } });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(
       expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
     );
   });
 
   it('rejects a branch/tier contradiction (Wu is Pferd, not Tiger)', () => {
     const drifted = baziFixture({ pillars: { month: { branch: 'Wu', tierDe: 'Tiger' } } });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(
       expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
     );
   });
 
   it('rejects a day-master element contradiction (day stem Xin reported as Holz)', () => {
     const drifted = baziFixture({ pillars: { day: { stem: 'Xin', elementDe: 'Holz' } } });
-    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), RUNTIME)).toThrow(
+    expect(() => buildHoroscopeModel(INPUT_RESULT.value, drifted, wuxingFixture(), NATAL, RUNTIME)).toThrow(
       expect.objectContaining({ code: 'HOROSCOPE_SYMBOL_CONTRADICTION' }) as HoroscopeError,
     );
   });
 
   it('passes FuFirE tier/element labels through verbatim when they agree with the mapping', () => {
-    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), RUNTIME);
+    const model = buildHoroscopeModel(INPUT_RESULT.value, baziFixture(), wuxingFixture(), NATAL, RUNTIME);
     expect(model.pillars.day.stemElementDe).toBe('Metall');
     expect(model.pillars.day.tierDe).toBe('Schwein');
   });

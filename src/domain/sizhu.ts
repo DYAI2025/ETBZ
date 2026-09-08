@@ -97,3 +97,51 @@ export function branchFactByName(name: string): BranchFact {
   }
   return fact;
 }
+
+// ---------------------------------------------------------------------------
+// ETBZ-29 — element vocabulary bridge (FuFirE natal <-> released Sizhu table).
+//
+// The `/v1/calculate/bazi` surface reports elements with GERMAN labels
+// (`Metall`), the `/v1/calculate/bazi/natal` surface with the ENGLISH lowercase
+// vocabulary of the dayun endpoint (`metal`). Both name the same five elements
+// — FuFirE states this itself in `routers/natal.py`: "the internal ledger's
+// German labels (WUXING_ORDER) name the same elements".
+//
+// The pairing below is NOT a calculation and NOT an inference: it is the
+// alignment of two observed released tables — FuFirE `dayun/jiazi.py`
+// `STEM_ELEMENT` (Jia/Yi->wood, Bing/Ding->fire, Wu/Ji->earth, Geng/Xin->metal,
+// Ren/Gui->water) against `TEN_STEMS` above (Jia/Yi->Holz, Bing/Ding->Feuer,
+// Wu/Ji->Erde, Geng/Xin->Metall, Ren/Gui->Wasser). Two of the five pairs are
+// additionally corroborated by the ETBZ-28 human-observed real-boundary smoke
+// (day master Geng -> `metal`; month-command principal Qi stem Bing -> `fire`).
+//
+// It exists ONLY so a natal element label can be checked against the released
+// Sizhu stem mapping. It never produces a fact of its own.
+// ---------------------------------------------------------------------------
+
+export type WuxingElementDe = StemFact['elementDe'];
+
+/** FuFirE's English element vocabulary (natal / dayun surfaces). */
+export const WUXING_ELEMENTS_EN = ['wood', 'fire', 'earth', 'metal', 'water'] as const;
+
+export type WuxingElementEn = (typeof WUXING_ELEMENTS_EN)[number];
+
+const ELEMENT_DE_BY_EN: Readonly<Record<WuxingElementEn, WuxingElementDe>> = {
+  wood: 'Holz',
+  fire: 'Feuer',
+  earth: 'Erde',
+  metal: 'Metall',
+  water: 'Wasser',
+};
+
+/**
+ * Translates a FuFirE English element label into the released German label.
+ * Fails closed: an element vocabulary ETBZ has never seen is not guessed.
+ */
+export function elementDeByEn(name: string): WuxingElementDe {
+  const mapped = (ELEMENT_DE_BY_EN as Readonly<Record<string, WuxingElementDe | undefined>>)[name];
+  if (mapped === undefined) {
+    throw new UnknownSymbolError(`no released element mapping for "${name}"`);
+  }
+  return mapped;
+}

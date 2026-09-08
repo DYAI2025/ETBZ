@@ -10,7 +10,12 @@
 
 import { validateBirthInput } from '../domain/birth-input.js';
 import type { BirthInputIssue, NormalizedBirthInput } from '../domain/birth-input.js';
-import type { FufireBaziGateway, FufireBaziSnapshot, WuxingSnapshot } from './ports/fufire-gateway.js';
+import type {
+  FufireBaziGateway,
+  FufireBaziSnapshot,
+  FufireNatalSnapshot,
+  WuxingSnapshot,
+} from './ports/fufire-gateway.js';
 import { buildHoroscopeModel } from './horoscope-model.js';
 import type { HoroscopeModel } from './horoscope-model.js';
 
@@ -27,7 +32,7 @@ export type HoroscopeUseCaseResult =
     };
 
 export interface HoroscopeUseCaseDependencies {
-  readonly gateway: Pick<FufireBaziGateway, 'calculateBazi' | 'calculateBaziWuxing'>;
+  readonly gateway: Pick<FufireBaziGateway, 'calculateBazi' | 'calculateBaziWuxing' | 'calculateNatal'>;
   readonly runtime: Readonly<{ runtimeImage: string; openapiSha256: string }>;
 }
 
@@ -58,7 +63,11 @@ export function createCalculateHoroscopeUseCase(dependencies: HoroscopeUseCaseDe
       try {
         const bazi: FufireBaziSnapshot = await gateway.calculateBazi(input);
         const wuxing: WuxingSnapshot = await gateway.calculateBaziWuxing(input);
-        const model = buildHoroscopeModel(input, bazi, wuxing, runtime);
+        // ETBZ-29 — natal facts belong to the same fact boundary. A natal
+        // failure is a failure of the whole model: no partial HoroscopeModel
+        // is ever returned.
+        const natal: FufireNatalSnapshot = await gateway.calculateNatal(input);
+        const model = buildHoroscopeModel(input, bazi, wuxing, natal, runtime);
         return { ok: true, model };
       } catch (error) {
         const message = error instanceof Error ? error.message : 'unknown FuFirE failure';

@@ -30,10 +30,13 @@ import {
   NATAL_ELEMENTS,
   NATAL_POLARITIES,
   NATAL_QI_ROLES,
+  NATAL_RESPONSE_KEYS,
+  NATAL_ROLE_WEIGHTS,
   NATAL_STEMS,
   TEN_GOD_ELEMENT_RELATIONS,
   TEN_GOD_NAMES,
   TEN_GOD_PINYIN,
+  TEN_GOD_ROWS,
   WUXING_ELEMENTS,
 } from '../../application/ports/fufire-gateway.js';
 import type { NormalizedBirthInput } from '../../domain/birth-input.js';
@@ -311,6 +314,30 @@ function asEnumValue<T extends string>(
   return text as T;
 }
 
+/**
+ * Rejects a key the pinned contract does not declare.
+ *
+ * Applied ONLY at the object levels `natal.response.schema.json` marks
+ * `additionalProperties: false` — which is every object level it defines.
+ * An unknown key there is drift by the contract's own statement, so ETBZ
+ * refuses the response instead of quietly ignoring the field. ETBZ is not
+ * made stricter than FuFirE anywhere the schema permits extras.
+ */
+function assertDeclaredKeys(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+  what: string,
+): void {
+  for (const key of Object.keys(body)) {
+    if (!allowed.includes(key)) {
+      throw new FufireError(
+        'FUFIRE_CONTRACT_ERROR',
+        `FuFirE response object ${what} carries the undeclared property "${key}" (the contract marks this level additionalProperties: false)`,
+      );
+    }
+  }
+}
+
 function asBoolean(value: unknown, what: string): boolean {
   if (typeof value !== 'boolean') {
     throw new FufireError('FUFIRE_CONTRACT_ERROR', `FuFirE response field ${what} is not a boolean`);
@@ -331,7 +358,8 @@ function asStringArray(value: unknown, what: string): readonly string[] {
 
 function mapTenGod(raw: unknown, what: string): FufireTenGodFact {
   const body = asObject(raw, what);
-  return {
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.tenGod, what);
+  const fact: FufireTenGodFact = {
     name: asEnumValue(body['name'], TEN_GOD_NAMES, `${what}.name`),
     pinyin: asEnumValue(body['pinyin'], TEN_GOD_PINYIN, `${what}.pinyin`),
     elementRelation: asEnumValue(
@@ -341,6 +369,27 @@ function mapTenGod(raw: unknown, what: string): FufireTenGodFact {
     ),
     labelDe: asString(body['label_de'], `${what}.label_de`),
   };
+  // Four individually valid enum members can still be a combination the
+  // released mapping never produces. The row is addressed by the name FuFirE
+  // itself sent — nothing is derived from birth data, and no Ten God is ever
+  // computed here; only the coherence of the supplied tuple is checked.
+  const row = TEN_GOD_ROWS.find((candidate) => candidate.name === fact.name);
+  if (row === undefined) {
+    throw new FufireError('FUFIRE_CONTRACT_ERROR', `${what}.name is not a released Ten-God row`);
+  }
+  if (
+    row.pinyin !== fact.pinyin ||
+    row.elementRelation !== fact.elementRelation ||
+    row.labelDe !== fact.labelDe
+  ) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what} is not a released Ten-God tuple: ${fact.name} maps to ` +
+        `(${row.pinyin}, ${row.elementRelation}, ${row.labelDe}), received ` +
+        `(${fact.pinyin}, ${fact.elementRelation}, ${fact.labelDe})`,
+    );
+  }
+  return fact;
 }
 
 function mapHiddenStems(raw: unknown, what: string): readonly FufireHiddenStemFact[] {
@@ -354,18 +403,25 @@ function mapHiddenStems(raw: unknown, what: string): readonly FufireHiddenStemFa
   const mapped = entries.map((entry, index): FufireHiddenStemFact => {
     const where = `${what}[${index}]`;
     const body = asObject(entry, where);
+    assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.hiddenStem, where);
     const weight = asNumber(body['weight'], `${where}.weight`);
-    if (!(weight > 0) || weight > 1) {
+    const qi = asEnumValue(body['qi'], NATAL_QI_ROLES, `${where}.qi`);
+    // qi and weight are ONE deterministic fact, not two loose ones: the pinned
+    // ruleset fixes principal=1, central=0.5, residual=0.3, and that is the
+    // only pairing the engine's own ledger can emit. A wrong weight is never
+    // normalized to the authorized one — the response is refused.
+    const authorizedWeight = NATAL_ROLE_WEIGHTS[qi];
+    if (weight !== authorizedWeight) {
       throw new FufireError(
         'FUFIRE_CONTRACT_ERROR',
-        `${where}.weight is outside the contract range (0 < weight <= 1)`,
+        `${where}: Qi role "${qi}" carries the ruleset weight ${authorizedWeight}, received ${weight}`,
       );
     }
     return {
       stem: asEnumValue(body['stem'], NATAL_STEMS, `${where}.stem`),
       stemCn: asString(body['stem_cn'], `${where}.stem_cn`),
       element: asEnumValue(body['element'], NATAL_ELEMENTS, `${where}.element`),
-      qi: asEnumValue(body['qi'], NATAL_QI_ROLES, `${where}.qi`),
+      qi,
       weight,
       // Contract: a Ten God is present for EVERY hidden stem, including the
       // day branch's. A missing one is drift, never an accepted gap.
@@ -391,6 +447,7 @@ type NatalPillarName = 'year' | 'month' | 'day' | 'hour';
 function mapNatalPillar(raw: unknown, name: NatalPillarName): FufireNatalPillarFact {
   const what = `pillars.${name}`;
   const body = asObject(raw, what);
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.pillar, what);
   const hiddenStems = mapHiddenStems(body['hidden_stems'], `${what}.hidden_stems`);
   const branchElement = asEnumValue(
     body['branch_element'],
@@ -448,7 +505,9 @@ function mapNatalPillar(raw: unknown, name: NatalPillarName): FufireNatalPillarF
 
 function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
   const body = asObject(raw, 'response');
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.root, 'response');
   const pillarsRaw = asObject(body['pillars'], 'pillars');
+  assertDeclaredKeys(pillarsRaw, NATAL_RESPONSE_KEYS.pillars, 'pillars');
   const pillars = {
     year: mapNatalPillar(pillarsRaw['year'], 'year'),
     month: mapNatalPillar(pillarsRaw['month'], 'month'),
@@ -457,6 +516,7 @@ function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
   };
 
   const dayMasterRaw = asObject(body['day_master'], 'day_master');
+  assertDeclaredKeys(dayMasterRaw, NATAL_RESPONSE_KEYS.dayMaster, 'day_master');
   const dayMaster: FufireNatalDayMasterFact = {
     stem: asEnumValue(dayMasterRaw['stem'], NATAL_STEMS, 'day_master.stem'),
     stemCn: asString(dayMasterRaw['stem_cn'], 'day_master.stem_cn'),
@@ -471,6 +531,7 @@ function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
   }
 
   const monthCommandRaw = asObject(body['month_command'], 'month_command');
+  assertDeclaredKeys(monthCommandRaw, NATAL_RESPONSE_KEYS.monthCommand, 'month_command');
   const branchIndex = asNumber(monthCommandRaw['branch_index'], 'month_command.branch_index');
   if (!Number.isInteger(branchIndex) || branchIndex < 0 || branchIndex > 11) {
     throw new FufireError(
@@ -528,6 +589,7 @@ function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
   }
 
   const provenanceRaw = asObject(body['provenance'], 'provenance');
+  assertDeclaredKeys(provenanceRaw, NATAL_RESPONSE_KEYS.provenance, 'provenance');
   const source = asString(provenanceRaw['source'], 'provenance.source');
   if (source !== 'FuFirE') {
     throw new FufireError(
@@ -543,6 +605,7 @@ function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
   };
 
   const precisionRaw = asObject(body['precision'], 'precision');
+  assertDeclaredKeys(precisionRaw, NATAL_RESPONSE_KEYS.precision, 'precision');
   const precision = {
     birthTimeKnown: asBoolean(precisionRaw['birth_time_known'], 'precision.birth_time_known'),
     provisionalFields: asStringArray(

@@ -498,3 +498,24 @@ export const UNKNOWN_TIME_NATAL_WIRE_OVERRIDES = {
   precision: { birth_time_known: false, provisional_fields: ['hour'] },
   warnings: ['DAY_ANCHOR_UNVERIFIED', 'BIRTH_TIME_UNKNOWN'],
 } as const;
+
+/**
+ * ETBZ-29 repair — a COMPLETE alternative row of the released Ten-God table
+ * (`DirectWealth`). Internally coherent, so it passes the adapter's tuple
+ * validation; it is simply a different row than the one this chart's hour
+ * pillar carries. Used by the canonical-anchor canary, which needs a
+ * contract-VALID single-fact change rather than an impossible source value.
+ */
+export const ALTERNATE_TEN_GOD_ROW = {
+  name: 'DirectWealth',
+  pinyin: 'Zheng Cai',
+  elementRelation: 'controlled_by_day_master',
+  labelDe: 'Direktes Vermögen',
+} as const;
+
+export const ALTERNATE_TEN_GOD_ROW_WIRE = {
+  name: 'DirectWealth',
+  pinyin: 'Zheng Cai',
+  element_relation: 'controlled_by_day_master',
+  label_de: 'Direktes Vermögen',
+} as const;

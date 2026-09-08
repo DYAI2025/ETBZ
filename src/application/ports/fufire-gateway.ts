@@ -168,7 +168,7 @@ export interface FufireHiddenStemFact {
   readonly element: NatalElement;
   /** `hidden_stems[].qi` */
   readonly qi: NatalQiRole;
-  /** `hidden_stems[].weight` — DECISION-003 role weight, 0 < w <= 1. */
+  /** `hidden_stems[].weight` — the DECISION-003 role weight of `qi` (see NATAL_ROLE_WEIGHTS). */
   readonly weight: number;
   /** `hidden_stems[].ten_god` — present for EVERY hidden stem. */
   readonly tenGod: FufireTenGodFact;
@@ -266,3 +266,91 @@ export interface FufireNatalSnapshot {
    */
   readonly warnings: readonly string[];
 }
+
+/**
+ * ETBZ-29 repair — the Qi role/weight table of the pinned ruleset.
+ *
+ * The weight is NOT a free number in the contract: it is a deterministic
+ * function of the Qi role. Three independent observations of the pinned
+ * source agree:
+ *
+ *   - `spec/rulesets/standard_bazi_2026.json` ->
+ *     `hidden_stems_weighting = { mode: "role_weights",
+ *      role_weights: { principal: 1.0, central: 0.5, residual: 0.3 } }`;
+ *   - the response schema's own `weight` description: "Qi-role weight
+ *     (DECISION-003: bound to the same table /calculate/wuxing computes from
+ *     — principal 1.0, central 0.5, residual 0.3)";
+ *   - measured through the engine itself: `match/normalize.py` assigns the
+ *     role by ROW POSITION in `wuxing/analysis.py::_BRANCH_HIDDEN`, and across
+ *     all twelve branches position 0 carries 1.0, position 1 carries 0.5 and
+ *     position 2 carries 0.3 — so the only (qi, weight) pairs the real ledger
+ *     builder can emit are exactly the three below.
+ *
+ * The JSON-Schema bound `0 < weight <= 1` is therefore the loose STRUCTURAL
+ * bound; this table is the SEMANTIC contract. ETBZ validates against the
+ * table and never normalizes or replaces a source weight.
+ */
+export const NATAL_ROLE_WEIGHTS: Readonly<Record<NatalQiRole, number>> = {
+  principal: 1,
+  central: 0.5,
+  residual: 0.3,
+};
+
+/**
+ * ETBZ-29 repair — the released Ten-God rows.
+ *
+ * THIS IS NOT A TEN-GODS CALCULATOR. It derives nothing from birth data and
+ * is never consulted to produce a Ten God; it exists only so that a Ten-God
+ * tuple FuFirE already sent can be checked for internal coherence.
+ *
+ * Provenance: derived mechanically from FuFirE's own code, not from memory.
+ * `routers/natal.py::_ten_god_block` composes `name` from
+ * `match.ten_gods.ten_god_for_stems` (ruleset `ten_gods.relation_to_god`) and
+ * `pinyin` / `element_relation` / `label_de` from
+ * `dayun.relation.compute_relation_to_day_master` — both from the SAME
+ * (day master, target stem) pair. Evaluating that composition over all 100
+ * stem pairs of the pinned build yields exactly these ten distinct tuples,
+ * each reachable ten times; `name`, `pinyin` and `label_de` are each unique
+ * keys of a row, while `element_relation` is shared by exactly two rows
+ * (the same-polarity and opposite-polarity variant of one relation).
+ *
+ * A response that combines individually valid enum members into a
+ * combination this table does not contain is contract drift.
+ */
+export interface TenGodRow {
+  readonly name: TenGodName;
+  readonly pinyin: TenGodPinyin;
+  readonly elementRelation: TenGodElementRelation;
+  readonly labelDe: string;
+}
+
+export const TEN_GOD_ROWS: readonly TenGodRow[] = [
+  { name: 'Friend', pinyin: 'Bi Jian', elementRelation: 'same_element', labelDe: 'Gefährte' },
+  { name: 'RobWealth', pinyin: 'Jie Cai', elementRelation: 'same_element', labelDe: 'Rivale' },
+  { name: 'EatingGod', pinyin: 'Shi Shen', elementRelation: 'produced_by_day_master', labelDe: 'Schöpferische Ausgabe' },
+  { name: 'HurtingOfficer', pinyin: 'Shang Guan', elementRelation: 'produced_by_day_master', labelDe: 'Disruptive Ausgabe' },
+  { name: 'IndirectWealth', pinyin: 'Pian Cai', elementRelation: 'controlled_by_day_master', labelDe: 'Indirektes Vermögen' },
+  { name: 'DirectWealth', pinyin: 'Zheng Cai', elementRelation: 'controlled_by_day_master', labelDe: 'Direktes Vermögen' },
+  { name: 'SevenKilling', pinyin: 'Qi Sha', elementRelation: 'controls_day_master', labelDe: 'Druck / Struktur' },
+  { name: 'DirectOfficer', pinyin: 'Zheng Guan', elementRelation: 'controls_day_master', labelDe: 'Verantwortung' },
+  { name: 'IndirectRes', pinyin: 'Pian Yin', elementRelation: 'produces_day_master', labelDe: 'Indirekte Quelle' },
+  { name: 'DirectRes', pinyin: 'Zheng Yin', elementRelation: 'produces_day_master', labelDe: 'Direkte Quelle' },
+] as const;
+
+/**
+ * The keys each object level of the response contract declares. Every one of
+ * these levels is marked `additionalProperties: false` in
+ * `natal.response.schema.json`, so an unknown key is drift by the pinned
+ * contract's own definition — not a tolerated additive change.
+ */
+export const NATAL_RESPONSE_KEYS = {
+  root: ['pillars', 'day_master', 'month_command', 'provenance', 'precision', 'warnings'],
+  pillars: ['year', 'month', 'day', 'hour'],
+  pillar: ['stem', 'branch', 'stem_cn', 'branch_cn', 'stem_element', 'branch_element', 'polarity', 'ten_god', 'hidden_stems'],
+  hiddenStem: ['stem', 'stem_cn', 'element', 'qi', 'weight', 'ten_god'],
+  tenGod: ['name', 'pinyin', 'element_relation', 'label_de'],
+  dayMaster: ['stem', 'stem_cn', 'element', 'polarity'],
+  monthCommand: ['branch', 'branch_cn', 'branch_index', 'principal_qi_stem', 'principal_qi_stem_cn', 'element', 'source_status'],
+  provenance: ['source', 'ruleset_id', 'ruleset_version', 'computed_at'],
+  precision: ['birth_time_known', 'provisional_fields'],
+} as const satisfies Readonly<Record<string, readonly string[]>>;

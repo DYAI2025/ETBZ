@@ -3,6 +3,7 @@ import { buildHoroscopeModel, HoroscopeError } from '../../src/application/horos
 import type { FufireBaziSnapshot, WuxingSnapshot } from '../../src/application/ports/fufire-gateway.js';
 import { validateBirthInput } from '../../src/domain/birth-input.js';
 import {
+  ALTERNATE_TEN_GOD_ROW,
   UNKNOWN_TIME_NATAL_OVERRIDES,
   deepMergeFixture,
   natalSnapshot,
@@ -370,16 +371,19 @@ describe('ETBZ-29 J: contradictory deterministic natal symbols fail closed', () 
 describe('ETBZ-29 L: a changed natal fact changes the canonical anchor', () => {
   const BASE = knownModel().canonicalJson;
 
+  // Every mutation below is CONTRACT-VALID: an authorized Qi/weight pairing, a
+  // complete released Ten-God row, a free-form provenance string. The canary
+  // proves the anchor is sensitive to natal CONTENT — it must not rely on a
+  // source value the boundary would refuse in the first place.
   it.each([
-    ['a hidden-stem weight', {
+    ['a pillar\'s hidden-stem list', {
       pillars: { year: { hiddenStems: [
-        { stem: 'Ding', stemCn: '丁', element: 'fire', qi: 'principal', weight: 0.9,
+        { stem: 'Ding', stemCn: '丁', element: 'fire', qi: 'principal', weight: 1,
           tenGod: { name: 'SevenKilling', pinyin: 'Qi Sha', elementRelation: 'controls_day_master', labelDe: 'Druck / Struktur' } },
-        { stem: 'Ji', stemCn: '己', element: 'earth', qi: 'central', weight: 0.5,
-          tenGod: { name: 'IndirectRes', pinyin: 'Pian Yin', elementRelation: 'produces_day_master', labelDe: 'Indirekte Quelle' } },
       ] } },
     }],
-    ['a Ten-God label', { pillars: { hour: { tenGod: { labelDe: 'Etwas anderes' } } } }],
+    ['a Ten-God row', { pillars: { hour: { tenGod: ALTERNATE_TEN_GOD_ROW } } }],
+    ['the natal ruleset id', { provenance: { rulesetId: 'standard_bazi_2027' } }],
     ['the month command branch index is untouched but its Chinese label is', {
       monthCommand: { branchCn: '午' },
     }],

@@ -7,6 +7,7 @@ import type { FufireClientConfig } from '../../src/adapters/fufire/http-client.j
 import { createCalculateHoroscopeUseCase } from '../../src/application/horoscope-use-case.js';
 import { validateBirthInput } from '../../src/domain/birth-input.js';
 import {
+  ALTERNATE_TEN_GOD_ROW_WIRE,
   UNKNOWN_TIME_NATAL_WIRE_OVERRIDES,
   natalSnapshot,
   natalWireBody,
@@ -305,6 +306,132 @@ describe('ETBZ-29 natal boundary: malformed deterministic facts fail closed', ()
   ])('fails closed on %s', async (_label, build) => {
     const client = clientReturning(build());
     await expect(client.calculateNatal(INPUT.value)).rejects.toMatchObject({
+      code: 'FUFIRE_CONTRACT_ERROR',
+    });
+  });
+});
+
+/** Replaces one hidden-stem entry of a pillar, leaving the rest untouched. */
+function withHiddenStem(
+  pillar: 'year' | 'month' | 'day' | 'hour',
+  index: number,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const body = natalWireBody();
+  const target = (body['pillars'] as Record<string, Record<string, unknown>>)[pillar] as Record<string, unknown>;
+  const hidden = target['hidden_stems'] as Record<string, unknown>[];
+  target['hidden_stems'] = hidden.map((entry, i) => (i === index ? { ...entry, ...patch } : entry));
+  return body;
+}
+
+describe('ETBZ-29 repair: qi and weight are ONE deterministic fact', () => {
+  it('accepts the authorized role weights (1 / 0.5 / 0.3)', async () => {
+    const snapshot = await clientReturning(natalWireBody()).calculateNatal(INPUT.value);
+    expect(snapshot.pillars.hour.hiddenStems.map((h) => [h.qi, h.weight])).toEqual([
+      ['principal', 1],
+      ['central', 0.5],
+      ['residual', 0.3],
+    ]);
+  });
+
+  it.each([
+    ['principal carrying the central weight', 'year' as const, 0, { weight: 0.5 }],
+    ['principal carrying an in-range but unauthorized weight', 'year' as const, 0, { weight: 0.9 }],
+    ['principal carrying the residual weight', 'year' as const, 0, { weight: 0.3 }],
+    ['central carrying the principal weight', 'year' as const, 1, { weight: 1 }],
+    ['central carrying the residual weight', 'year' as const, 1, { weight: 0.3 }],
+    ['residual carrying the central weight', 'hour' as const, 2, { weight: 0.5 }],
+    ['residual carrying the principal weight', 'hour' as const, 2, { weight: 1 }],
+  ])(
+    'fails closed on %s (the qi value is valid and the weight is inside 0 < w <= 1)',
+    async (_label, pillar, index, patch) => {
+      // Every one of these passes the loose JSON-Schema bound. Only the
+      // ruleset role_weights tuple rejects them.
+      const body = withHiddenStem(pillar, index, patch);
+      await expect(clientReturning(body).calculateNatal(INPUT.value)).rejects.toMatchObject({
+        code: 'FUFIRE_CONTRACT_ERROR',
+      });
+    },
+  );
+
+  it('never normalizes a wrong source weight to the authorized one', async () => {
+    const body = withHiddenStem('year', 0, { weight: 0.9 });
+    const outcome = await clientReturning(body).calculateNatal(INPUT.value).then(
+      (snapshot) => ({ repaired: snapshot.pillars.year.hiddenStems[0]?.weight }),
+      (error: unknown) => ({ rejected: (error as { code?: string }).code }),
+    );
+    expect(outcome).toEqual({ rejected: 'FUFIRE_CONTRACT_ERROR' });
+  });
+});
+
+describe('ETBZ-29 repair: a Ten-God tuple must be a released row', () => {
+  it('accepts a complete alternative released row', async () => {
+    const body = natalWireBody({ pillars: { hour: { ten_god: ALTERNATE_TEN_GOD_ROW_WIRE } } });
+    const snapshot = await clientReturning(body).calculateNatal(INPUT.value);
+    expect(snapshot.pillars.hour.tenGod?.name).toBe('DirectWealth');
+  });
+
+  it.each([
+    ['a visible-stem Ten God pairing two valid names', { pillars: { year: { ten_god: { pinyin: 'Bi Jian' } } } }],
+    ['a visible-stem Ten God with another row\'s element relation', {
+      pillars: { hour: { ten_god: { element_relation: 'produces_day_master' } } },
+    }],
+    ['a visible-stem Ten God with another row\'s German label', {
+      pillars: { hour: { ten_god: { label_de: 'Rivale' } } },
+    }],
+    ['a visible-stem Ten God whose name belongs to the other polarity variant', {
+      pillars: { year: { ten_god: { name: 'Friend' } } },
+    }],
+  ])('fails closed on %s (every member is individually valid)', async (_label, overrides) => {
+    await expect(
+      clientReturning(natalWireBody(overrides)).calculateNatal(INPUT.value),
+    ).rejects.toMatchObject({ code: 'FUFIRE_CONTRACT_ERROR' });
+  });
+
+  it.each([
+    ['a hidden-stem Ten God pairing two valid names', 'year' as const, 0, { ten_god: { name: 'SevenKilling', pinyin: 'Zheng Guan', element_relation: 'controls_day_master', label_de: 'Druck / Struktur' } }],
+    ['a hidden-stem Ten God with another row\'s German label', 'year' as const, 1, { ten_god: { name: 'IndirectRes', pinyin: 'Pian Yin', element_relation: 'produces_day_master', label_de: 'Direkte Quelle' } }],
+    ['a hidden-stem Ten God with another row\'s element relation', 'hour' as const, 2, { ten_god: { name: 'SevenKilling', pinyin: 'Qi Sha', element_relation: 'produced_by_day_master', label_de: 'Druck / Struktur' } }],
+  ])('fails closed on %s', async (_label, pillar, index, patch) => {
+    await expect(
+      clientReturning(withHiddenStem(pillar, index, patch)).calculateNatal(INPUT.value),
+    ).rejects.toMatchObject({ code: 'FUFIRE_CONTRACT_ERROR' });
+  });
+
+  it('validates coherence only — it never derives a Ten God from birth data', async () => {
+    // A row that is internally coherent but astrologically wrong for this
+    // stem pair is ACCEPTED: deciding which Ten God is correct would require
+    // an ETBZ Ten-Gods calculator, which this slice deliberately does not ship.
+    const body = natalWireBody({ pillars: { year: { ten_god: ALTERNATE_TEN_GOD_ROW_WIRE } } });
+    await expect(clientReturning(body).calculateNatal(INPUT.value)).resolves.toBeDefined();
+  });
+});
+
+describe('ETBZ-29 repair: undeclared properties are drift, not additive change', () => {
+  it.each([
+    ['the response root', (): Record<string, unknown> => natalWireBody({ strength: 'strong' })],
+    ['the pillars container', (): Record<string, unknown> => natalWireBody({ pillars: { extra: {} } })],
+    ['a pillar', (): Record<string, unknown> => natalWireBody({ pillars: { year: { rooting: true } } })],
+    ['a hidden stem', (): Record<string, unknown> => withHiddenStem('year', 0, { confidence: 1 })],
+    ['a visible-stem Ten God', (): Record<string, unknown> =>
+      natalWireBody({ pillars: { year: { ten_god: { score: 3 } } } })],
+    ['a hidden-stem Ten God', (): Record<string, unknown> =>
+      withHiddenStem('year', 0, { ten_god: { name: 'SevenKilling', pinyin: 'Qi Sha', element_relation: 'controls_day_master', label_de: 'Druck / Struktur', score: 3 } })],
+    ['the day master', (): Record<string, unknown> => natalWireBody({ day_master: { strength: 'weak' } })],
+    ['the month command', (): Record<string, unknown> => natalWireBody({ month_command: { seasonal_state: 'Wang' } })],
+    ['the provenance block', (): Record<string, unknown> => natalWireBody({ provenance: { engine_version: '9' } })],
+    ['the precision block', (): Record<string, unknown> => natalWireBody({ precision: { confidence: 0.9 } })],
+  ])('fails closed on an undeclared property at %s', async (_label, build) => {
+    await expect(clientReturning(build()).calculateNatal(INPUT.value)).rejects.toMatchObject({
+      code: 'FUFIRE_CONTRACT_ERROR',
+    });
+  });
+
+  it('rejects a smuggled fabricated-strength field rather than ignoring it', async () => {
+    // The forbidden ETBZ-29 concepts must not enter silently even if a future
+    // engine started emitting them: the pinned contract forbids extra keys.
+    const body = natalWireBody({ month_command: { seasonal_state: 'Wang' } });
+    await expect(clientReturning(body).calculateNatal(INPUT.value)).rejects.toMatchObject({
       code: 'FUFIRE_CONTRACT_ERROR',
     });
   });

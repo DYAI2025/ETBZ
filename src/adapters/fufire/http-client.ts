@@ -15,10 +15,30 @@
 import type {
   FufireBaziGateway,
   FufireBaziSnapshot,
+  FufireHiddenStemFact,
+  FufireMonthCommandFact,
+  FufireNatalDayMasterFact,
+  FufireNatalPillarFact,
+  FufireNatalProvenance,
+  FufireNatalSnapshot,
   FufirePillarFact,
+  FufireTenGodFact,
   WuxingSnapshot,
 } from '../../application/ports/fufire-gateway.js';
-import { WUXING_ELEMENTS } from '../../application/ports/fufire-gateway.js';
+import {
+  NATAL_BRANCHES,
+  NATAL_ELEMENTS,
+  NATAL_POLARITIES,
+  NATAL_QI_ROLES,
+  NATAL_RESPONSE_KEYS,
+  NATAL_ROLE_WEIGHTS,
+  NATAL_STEMS,
+  TEN_GOD_ELEMENT_RELATIONS,
+  TEN_GOD_NAMES,
+  TEN_GOD_PINYIN,
+  TEN_GOD_ROWS,
+  WUXING_ELEMENTS,
+} from '../../application/ports/fufire-gateway.js';
 import type { NormalizedBirthInput } from '../../domain/birth-input.js';
 
 export const FUFIRE_BAZI_PATH = '/v1/calculate/bazi';
@@ -262,6 +282,347 @@ function mapWuxingSnapshot(raw: unknown): WuxingSnapshot {
   };
 }
 
+// =============================================================================
+// ETBZ-29 — the NATAL operation of the same boundary.
+//
+// This is a minimal extension of the client above, NOT a second client: the
+// server-owned base URL, the server-owned `X-API-Key`, the timeout semantics,
+// the typed failure taxonomy and the fail-closed rule are the existing ones.
+// Only the pinned operation path and the response mapping are new.
+//
+// The request payload is `buildRequest(...)` unchanged: `NatalRequest`
+// (`schemas/calculate/bazi/natal.request.schema.json`, `additionalProperties:
+// false`) accepts exactly the keys ETBZ already sends — date, tz, lat, lon,
+// standard, birth_time_known — so unknown time still means an OMITTED time and
+// `birth_time_known: false`, never a substituted `T00:00`.
+// =============================================================================
+
+export const FUFIRE_NATAL_PATH = '/v1/calculate/bazi/natal';
+
+function asEnumValue<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  what: string,
+): T {
+  const text = asString(value, what);
+  if (!(allowed as readonly string[]).includes(text)) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `FuFirE response field ${what} is not one of the pinned contract values`,
+    );
+  }
+  return text as T;
+}
+
+/**
+ * Rejects a key the pinned contract does not declare.
+ *
+ * Applied ONLY at the object levels `natal.response.schema.json` marks
+ * `additionalProperties: false` — which is every object level it defines.
+ * An unknown key there is drift by the contract's own statement, so ETBZ
+ * refuses the response instead of quietly ignoring the field. ETBZ is not
+ * made stricter than FuFirE anywhere the schema permits extras.
+ */
+function assertDeclaredKeys(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+  what: string,
+): void {
+  for (const key of Object.keys(body)) {
+    if (!allowed.includes(key)) {
+      throw new FufireError(
+        'FUFIRE_CONTRACT_ERROR',
+        `FuFirE response object ${what} carries the undeclared property "${key}" (the contract marks this level additionalProperties: false)`,
+      );
+    }
+  }
+}
+
+function asBoolean(value: unknown, what: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new FufireError('FUFIRE_CONTRACT_ERROR', `FuFirE response field ${what} is not a boolean`);
+  }
+  return value;
+}
+
+function asArray(value: unknown, what: string): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new FufireError('FUFIRE_CONTRACT_ERROR', `FuFirE response field ${what} is not an array`);
+  }
+  return value;
+}
+
+function asStringArray(value: unknown, what: string): readonly string[] {
+  return asArray(value, what).map((entry, index) => asString(entry, `${what}[${index}]`));
+}
+
+function mapTenGod(raw: unknown, what: string): FufireTenGodFact {
+  const body = asObject(raw, what);
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.tenGod, what);
+  const fact: FufireTenGodFact = {
+    name: asEnumValue(body['name'], TEN_GOD_NAMES, `${what}.name`),
+    pinyin: asEnumValue(body['pinyin'], TEN_GOD_PINYIN, `${what}.pinyin`),
+    elementRelation: asEnumValue(
+      body['element_relation'],
+      TEN_GOD_ELEMENT_RELATIONS,
+      `${what}.element_relation`,
+    ),
+    labelDe: asString(body['label_de'], `${what}.label_de`),
+  };
+  // Four individually valid enum members can still be a combination the
+  // released mapping never produces. The row is addressed by the name FuFirE
+  // itself sent — nothing is derived from birth data, and no Ten God is ever
+  // computed here; only the coherence of the supplied tuple is checked.
+  const row = TEN_GOD_ROWS.find((candidate) => candidate.name === fact.name);
+  if (row === undefined) {
+    throw new FufireError('FUFIRE_CONTRACT_ERROR', `${what}.name is not a released Ten-God row`);
+  }
+  if (
+    row.pinyin !== fact.pinyin ||
+    row.elementRelation !== fact.elementRelation ||
+    row.labelDe !== fact.labelDe
+  ) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what} is not a released Ten-God tuple: ${fact.name} maps to ` +
+        `(${row.pinyin}, ${row.elementRelation}, ${row.labelDe}), received ` +
+        `(${fact.pinyin}, ${fact.elementRelation}, ${fact.labelDe})`,
+    );
+  }
+  return fact;
+}
+
+function mapHiddenStems(raw: unknown, what: string): readonly FufireHiddenStemFact[] {
+  const entries = asArray(raw, what);
+  if (entries.length < 1 || entries.length > 3) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what} must hold 1..3 hidden stems (contract minItems/maxItems)`,
+    );
+  }
+  const mapped = entries.map((entry, index): FufireHiddenStemFact => {
+    const where = `${what}[${index}]`;
+    const body = asObject(entry, where);
+    assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.hiddenStem, where);
+    const weight = asNumber(body['weight'], `${where}.weight`);
+    const qi = asEnumValue(body['qi'], NATAL_QI_ROLES, `${where}.qi`);
+    // qi and weight are ONE deterministic fact, not two loose ones: the pinned
+    // ruleset fixes principal=1, central=0.5, residual=0.3, and that is the
+    // only pairing the engine's own ledger can emit. A wrong weight is never
+    // normalized to the authorized one — the response is refused.
+    const authorizedWeight = NATAL_ROLE_WEIGHTS[qi];
+    if (weight !== authorizedWeight) {
+      throw new FufireError(
+        'FUFIRE_CONTRACT_ERROR',
+        `${where}: Qi role "${qi}" carries the ruleset weight ${authorizedWeight}, received ${weight}`,
+      );
+    }
+    return {
+      stem: asEnumValue(body['stem'], NATAL_STEMS, `${where}.stem`),
+      stemCn: asString(body['stem_cn'], `${where}.stem_cn`),
+      element: asEnumValue(body['element'], NATAL_ELEMENTS, `${where}.element`),
+      qi,
+      weight,
+      // Contract: a Ten God is present for EVERY hidden stem, including the
+      // day branch's. A missing one is drift, never an accepted gap.
+      tenGod: mapTenGod(body['ten_god'], `${where}.ten_god`),
+    };
+  });
+  // Contract: "the branch's hidden stems in Qi order (principal, then central,
+  // then residual, as far as the branch has them)". Order carries meaning, so
+  // it is verified rather than re-sorted.
+  const expectedOrder = NATAL_QI_ROLES.slice(0, mapped.length);
+  const actualOrder = mapped.map((entry) => entry.qi);
+  if (actualOrder.join(',') !== expectedOrder.join(',')) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what} is not in the contract Qi order (principal, central, residual)`,
+    );
+  }
+  return mapped;
+}
+
+type NatalPillarName = 'year' | 'month' | 'day' | 'hour';
+
+function mapNatalPillar(raw: unknown, name: NatalPillarName): FufireNatalPillarFact {
+  const what = `pillars.${name}`;
+  const body = asObject(raw, what);
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.pillar, what);
+  const hiddenStems = mapHiddenStems(body['hidden_stems'], `${what}.hidden_stems`);
+  const branchElement = asEnumValue(
+    body['branch_element'],
+    NATAL_ELEMENTS,
+    `${what}.branch_element`,
+  );
+  const principal = hiddenStems[0];
+  if (principal === undefined || principal.qi !== 'principal') {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what}.hidden_stems has no principal Qi stem`,
+    );
+  }
+  // Contract: branch_element IS the element of the branch's principal hidden
+  // stem ("the identical derivation MonthCommand.element uses").
+  if (branchElement !== principal.element) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `${what}.branch_element (${branchElement}) contradicts the principal hidden stem element (${principal.element})`,
+    );
+  }
+  // Contract: `ten_god` is null for the day pillar ONLY — the day stem IS the
+  // day master, so no relation to itself exists.
+  const rawTenGod = body['ten_god'];
+  let tenGod: FufireTenGodFact | null;
+  if (name === 'day') {
+    if (rawTenGod !== null) {
+      throw new FufireError(
+        'FUFIRE_CONTRACT_ERROR',
+        'pillars.day.ten_god must be null (the day stem is the day master)',
+      );
+    }
+    tenGod = null;
+  } else {
+    if (rawTenGod === null) {
+      throw new FufireError(
+        'FUFIRE_CONTRACT_ERROR',
+        `${what}.ten_god is null; only the day pillar may omit its Ten God`,
+      );
+    }
+    tenGod = mapTenGod(rawTenGod, `${what}.ten_god`);
+  }
+  return {
+    stem: asEnumValue(body['stem'], NATAL_STEMS, `${what}.stem`),
+    branch: asEnumValue(body['branch'], NATAL_BRANCHES, `${what}.branch`),
+    stemCn: asString(body['stem_cn'], `${what}.stem_cn`),
+    branchCn: asString(body['branch_cn'], `${what}.branch_cn`),
+    stemElement: asEnumValue(body['stem_element'], NATAL_ELEMENTS, `${what}.stem_element`),
+    branchElement,
+    polarity: asEnumValue(body['polarity'], NATAL_POLARITIES, `${what}.polarity`),
+    tenGod,
+    hiddenStems,
+  };
+}
+
+function mapNatalSnapshot(raw: unknown): FufireNatalSnapshot {
+  const body = asObject(raw, 'response');
+  assertDeclaredKeys(body, NATAL_RESPONSE_KEYS.root, 'response');
+  const pillarsRaw = asObject(body['pillars'], 'pillars');
+  assertDeclaredKeys(pillarsRaw, NATAL_RESPONSE_KEYS.pillars, 'pillars');
+  const pillars = {
+    year: mapNatalPillar(pillarsRaw['year'], 'year'),
+    month: mapNatalPillar(pillarsRaw['month'], 'month'),
+    day: mapNatalPillar(pillarsRaw['day'], 'day'),
+    hour: mapNatalPillar(pillarsRaw['hour'], 'hour'),
+  };
+
+  const dayMasterRaw = asObject(body['day_master'], 'day_master');
+  assertDeclaredKeys(dayMasterRaw, NATAL_RESPONSE_KEYS.dayMaster, 'day_master');
+  const dayMaster: FufireNatalDayMasterFact = {
+    stem: asEnumValue(dayMasterRaw['stem'], NATAL_STEMS, 'day_master.stem'),
+    stemCn: asString(dayMasterRaw['stem_cn'], 'day_master.stem_cn'),
+    element: asEnumValue(dayMasterRaw['element'], NATAL_ELEMENTS, 'day_master.element'),
+    polarity: asEnumValue(dayMasterRaw['polarity'], NATAL_POLARITIES, 'day_master.polarity'),
+  };
+  if (dayMaster.stem !== pillars.day.stem) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `day_master.stem (${dayMaster.stem}) contradicts pillars.day.stem (${pillars.day.stem})`,
+    );
+  }
+
+  const monthCommandRaw = asObject(body['month_command'], 'month_command');
+  assertDeclaredKeys(monthCommandRaw, NATAL_RESPONSE_KEYS.monthCommand, 'month_command');
+  const branchIndex = asNumber(monthCommandRaw['branch_index'], 'month_command.branch_index');
+  if (!Number.isInteger(branchIndex) || branchIndex < 0 || branchIndex > 11) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      'month_command.branch_index is not an integer in 0..11',
+    );
+  }
+  const sourceStatus = asString(monthCommandRaw['source_status'], 'month_command.source_status');
+  if (sourceStatus !== 'CALCULATED') {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `month_command.source_status is "${sourceStatus}", not the contract constant CALCULATED`,
+    );
+  }
+  const monthCommand: FufireMonthCommandFact = {
+    branch: asEnumValue(monthCommandRaw['branch'], NATAL_BRANCHES, 'month_command.branch'),
+    branchCn: asString(monthCommandRaw['branch_cn'], 'month_command.branch_cn'),
+    branchIndex,
+    principalQiStem: asEnumValue(
+      monthCommandRaw['principal_qi_stem'],
+      NATAL_STEMS,
+      'month_command.principal_qi_stem',
+    ),
+    principalQiStemCn: asString(
+      monthCommandRaw['principal_qi_stem_cn'],
+      'month_command.principal_qi_stem_cn',
+    ),
+    element: asEnumValue(monthCommandRaw['element'], NATAL_ELEMENTS, 'month_command.element'),
+    sourceStatus: 'CALCULATED',
+  };
+  // The month command IS the month branch's ruleset lookup — a month command
+  // that names a different branch, stem or element than the month pillar it
+  // was derived from is drift, not a fact.
+  if (monthCommand.branch !== pillars.month.branch) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `month_command.branch (${monthCommand.branch}) contradicts pillars.month.branch (${pillars.month.branch})`,
+    );
+  }
+  const monthPrincipal = pillars.month.hiddenStems[0];
+  if (monthPrincipal === undefined) {
+    throw new FufireError('FUFIRE_CONTRACT_ERROR', 'pillars.month.hidden_stems is empty');
+  }
+  if (monthCommand.principalQiStem !== monthPrincipal.stem) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `month_command.principal_qi_stem (${monthCommand.principalQiStem}) contradicts the month pillar's principal hidden stem (${monthPrincipal.stem})`,
+    );
+  }
+  if (monthCommand.element !== monthPrincipal.element) {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `month_command.element (${monthCommand.element}) contradicts the principal Qi stem element (${monthPrincipal.element})`,
+    );
+  }
+
+  const provenanceRaw = asObject(body['provenance'], 'provenance');
+  assertDeclaredKeys(provenanceRaw, NATAL_RESPONSE_KEYS.provenance, 'provenance');
+  const source = asString(provenanceRaw['source'], 'provenance.source');
+  if (source !== 'FuFirE') {
+    throw new FufireError(
+      'FUFIRE_CONTRACT_ERROR',
+      `provenance.source is "${source}", not the contract constant FuFirE`,
+    );
+  }
+  const provenance: FufireNatalProvenance = {
+    source: 'FuFirE',
+    rulesetId: asString(provenanceRaw['ruleset_id'], 'provenance.ruleset_id'),
+    rulesetVersion: asString(provenanceRaw['ruleset_version'], 'provenance.ruleset_version'),
+    computedAt: asString(provenanceRaw['computed_at'], 'provenance.computed_at'),
+  };
+
+  const precisionRaw = asObject(body['precision'], 'precision');
+  assertDeclaredKeys(precisionRaw, NATAL_RESPONSE_KEYS.precision, 'precision');
+  const precision = {
+    birthTimeKnown: asBoolean(precisionRaw['birth_time_known'], 'precision.birth_time_known'),
+    provisionalFields: asStringArray(
+      precisionRaw['provisional_fields'],
+      'precision.provisional_fields',
+    ),
+  };
+
+  // Source warnings: STRUCTURE is validated, MEANING is not. There is no
+  // allowlist here on purpose — an unknown but structurally valid stable code
+  // must pass this boundary unchanged. Order is kept, duplicates are kept,
+  // nothing is renamed, nothing is dropped, nothing is added.
+  const warnings = asStringArray(body['warnings'], 'warnings');
+
+  return { pillars, dayMaster, monthCommand, provenance, precision, warnings };
+}
+
 export interface FufireClientDependencies {
   readonly config: FufireClientConfig;
   /** Injectable for tests; production uses the global fetch. */
@@ -280,6 +641,10 @@ export function createFufireClient(dependencies: FufireClientDependencies): Fufi
     async calculateBaziWuxing(input: NormalizedBirthInput): Promise<WuxingSnapshot> {
       const raw = await postJson(config, transport, FUFIRE_WUXING_PATH, buildRequest(input));
       return mapWuxingSnapshot(raw);
+    },
+    async calculateNatal(input: NormalizedBirthInput): Promise<FufireNatalSnapshot> {
+      const raw = await postJson(config, transport, FUFIRE_NATAL_PATH, buildRequest(input));
+      return mapNatalSnapshot(raw);
     },
   };
 }

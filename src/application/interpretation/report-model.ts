@@ -16,10 +16,31 @@
  *                        labelled and separate, the provider's own notes
  *       methodNotes    — what was evaluated and what was not, and why
  *
+ * A SECTION IS A PRIMARY THEME. The candidate ThemeGraph stays complete in the
+ * brief and a provider may read all of it, but a section that names a candidate
+ * theme id is refused with its own code: the exhaustive structural index must
+ * not leak into the sold artefact one chapter per node. The section count is
+ * held between the policy's floor and ceiling for the same reason.
+ *
  * Every failure below is a REFUSAL. Nothing is repaired, trimmed, re-labelled
  * or downgraded: a provider that changes a chart fact, invents a symbol, claims
- * a method this slice does not evaluate, drops a provisionality or writes
- * unbound generic paragraphs produces NO report.
+ * a method this slice does not evaluate, drops a provisionality, narrates a raw
+ * candidate theme or writes unbound generic paragraphs produces NO report.
+ *
+ * WHAT THIS GATE STILL CANNOT SEE, stated rather than implied. Two semantic
+ * failure modes survive every check below and are deliberately OUT OF SCOPE for
+ * this slice; both need a Narrative-QA gate that reasons about meaning:
+ *
+ *   1. ROLE. A cited symbol can still be given the wrong linguistic role in
+ *      free prose — a section citing a stem and a branch can call the stem a
+ *      branch, and every structural check here still passes.
+ *   2. TONE OF CERTAINTY. A provider can attach a structurally correct
+ *      uncertainty note while the prose beside it expresses certainty. The note
+ *      is present, so the provisionality guard is satisfied; the sentence still
+ *      overclaims.
+ *
+ * Nothing in this file should be read as proving the semantic truth of
+ * arbitrary free prose. It proves attachment, not meaning.
  */
 
 import { canonicalJson } from '../../domain/canonical-json.js';
@@ -34,14 +55,17 @@ import { NOT_EVALUATED_METHODS } from './method-scope.js';
 import type { MethodNote } from './method-scope.js';
 import { buildNarrativeChain } from './narrative-brief.js';
 import type { NarrativeBrief } from './narrative-brief.js';
+import type { PrimaryTheme, PrimaryThemeFamily } from './primary-theme.js';
 import type { SpecificityPolicy } from './specificity-policy.js';
-import type { Theme, ThemeKind } from './theme-graph.js';
 
 export interface ReportSection {
+  /** A PRIMARY theme id. A candidate ThemeGraph id here is refused. */
   readonly themeId: string;
-  /** The source-owned label of the theme, copied from the brief. */
-  readonly themeLabel: string;
-  readonly themeKind: ThemeKind;
+  readonly themeFamily: PrimaryThemeFamily;
+  /** The candidate themes this chapter groups, copied from the brief. */
+  readonly sourceThemeIds: readonly string[];
+  /** Their source-owned labels, in `sourceThemeIds` order. Never an ETBZ coinage. */
+  readonly sourceThemeLabels: readonly string[];
   /** Sorted, de-duplicated fact ids this section is bound to. */
   readonly citedFactIds: readonly string[];
   readonly prose: string;
@@ -92,6 +116,7 @@ export interface ReportModel {
     briefStructuralHash: string;
     featureSetStructuralHash: string;
     themeGraphStructuralHash: string;
+    primaryThemeProjectionStructuralHash: string;
   }>;
   readonly canonicalJson: string;
   readonly structuralHash: string;
@@ -176,11 +201,22 @@ interface ValidatedSection {
 
 function validateSection(
   draft: NarrativeSectionDraft,
-  themesById: ReadonlyMap<string, Theme>,
+  primaryThemesById: ReadonlyMap<string, PrimaryTheme>,
+  candidateThemeIds: ReadonlySet<string>,
   factsById: ReadonlyMap<string, ChartFact>,
 ): ValidatedSection {
-  const theme = themesById.get(draft.themeId);
+  const theme = primaryThemesById.get(draft.themeId);
   if (theme === undefined) {
+    // A candidate id is a DIFFERENT mistake from an invented one, and saying so
+    // is the difference between a provider fixing its output in one step and
+    // guessing. The candidate theme exists, is in the brief, and is still not a
+    // chapter.
+    if (candidateThemeIds.has(draft.themeId)) {
+      throw new ReportError(
+        'REPORT_CANDIDATE_THEME_NOT_NARRATABLE',
+        `section names candidate theme "${draft.themeId}"; candidate themes are structural nuance and only a primary theme may be a report section`,
+      );
+    }
     throw new ReportError(
       'REPORT_UNKNOWN_THEME',
       `section names theme "${draft.themeId}", which the brief does not contain`,
@@ -283,8 +319,9 @@ function validateSection(
   return {
     section: {
       themeId: theme.id,
-      themeLabel: theme.label,
-      themeKind: theme.kind,
+      themeFamily: theme.family,
+      sourceThemeIds: theme.sourceThemeIds,
+      sourceThemeLabels: theme.sourceThemeLabels,
       citedFactIds: sortedUnique(citedFactIds),
       prose: draft.prose,
       citesProvisionalFacts: citesProvisional,
@@ -336,7 +373,23 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
     );
   }
 
-  const themesById = new Map<string, Theme>(trusted.themes.map((theme) => [theme.id, theme]));
+  // The compact-report ceiling is checked HERE, on the raw section count, and
+  // deliberately before any per-section validation: an oversized report is a
+  // product-contract violation in its own right. Reporting whichever duplicate
+  // or unknown theme happened to come first would name a symptom of "too many
+  // chapters" instead of the thing that is wrong.
+  const { specificity } = trusted.constraints;
+  if (output.sections.length > specificity.maxSections) {
+    throw new ReportError(
+      'REPORT_TOO_MANY_SECTIONS',
+      `report carries ${String(output.sections.length)} sections, the policy ceiling is ${String(specificity.maxSections)}; a compact report does not publish one chapter per structural candidate`,
+    );
+  }
+
+  const primaryThemesById = new Map<string, PrimaryTheme>(
+    trusted.primaryThemes.map((theme) => [theme.id, theme]),
+  );
+  const candidateThemeIds = new Set<string>(trusted.constraints.candidateThemeIds);
   const factsById = new Map<string, ChartFact>(trusted.facts.map((fact) => [fact.id, fact]));
 
   const seenThemes = new Set<string>();
@@ -351,7 +404,7 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
         `theme "${draft.themeId}" is narrated twice; the report would state it as two independent findings`,
       );
     }
-    const validated = validateSection(draft, themesById, factsById);
+    const validated = validateSection(draft, primaryThemesById, candidateThemeIds, factsById);
     seenThemes.add(validated.section.themeId);
     sections.push(validated.section);
     factKindsBySection.push(validated.factKinds);
@@ -360,7 +413,7 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
     }
   }
 
-  assertSpecificity(sections, factKindsBySection, trusted.constraints.specificity);
+  assertSpecificity(sections, factKindsBySection, specificity);
 
   const report = {
     reportVersion: 'etbz-25.report-model.v1' as const,
@@ -394,6 +447,7 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
       briefStructuralHash: trusted.structuralHash,
       featureSetStructuralHash: trusted.featureSetStructuralHash,
       themeGraphStructuralHash: trusted.themeGraphStructuralHash,
+      primaryThemeProjectionStructuralHash: trusted.primaryThemeProjectionStructuralHash,
     },
   };
 
@@ -401,7 +455,9 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
   // else — the same two exclusions ETBZ-24/29 already justified from observed
   // FuFirE behaviour. Both remain on the model above as evidence. Every fact,
   // every section, every warning and every method note is inside the anchor, so
-  // any relevant mutation changes the hash.
+  // any relevant mutation changes the hash. The primary-projection hash is in
+  // there too: a change to which candidate themes a chapter groups, or to the
+  // facts it unions, moves the report's identity.
   const canonical = canonicalJson({
     reportVersion: report.reportVersion,
     subject: report.subject,
@@ -422,6 +478,8 @@ export function buildReportModel(input: BuildReportModelInput): ReportModel {
       briefStructuralHash: report.provenance.briefStructuralHash,
       featureSetStructuralHash: report.provenance.featureSetStructuralHash,
       themeGraphStructuralHash: report.provenance.themeGraphStructuralHash,
+      primaryThemeProjectionStructuralHash:
+        report.provenance.primaryThemeProjectionStructuralHash,
     },
   });
 

@@ -38,6 +38,11 @@ export type ReportErrorCode =
   | 'REPORT_BRIEF_HASH_MISMATCH'
   /** A section names a theme the brief does not contain. */
   | 'REPORT_UNKNOWN_THEME'
+  /** A section names a CANDIDATE ThemeGraph id. Candidate themes are structural
+   *  nuance, not chapters: only a primary theme may become a report section. */
+  | 'REPORT_CANDIDATE_THEME_NOT_NARRATABLE'
+  /** The provider returned more sections than the compact-report ceiling. */
+  | 'REPORT_TOO_MANY_SECTIONS'
   /** Two sections claim the same theme; the report would state it twice. */
   | 'REPORT_DUPLICATE_THEME_SECTION'
   /** A cited fact id does not exist in the brief. */

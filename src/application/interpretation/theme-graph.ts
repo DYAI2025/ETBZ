@@ -32,6 +32,23 @@ export type ThemeKind =
   | 'ten_god_relation'
   | 'wu_xing_element';
 
+/**
+ * The same union, enumerable at runtime.
+ *
+ * It exists so the primary-theme projection can be PROVEN exhaustive over the
+ * candidate kinds instead of assumed exhaustive: a kind added to the union
+ * without a primary family is caught by a test rather than silently dropped out
+ * of the customer-facing layer. `satisfies` keeps the two spellings in
+ * lockstep, so a wrong entry is a compile error rather than a runtime surprise.
+ */
+export const THEME_KINDS = [
+  'day_master',
+  'month_command',
+  'pillar',
+  'ten_god_relation',
+  'wu_xing_element',
+] as const satisfies readonly ThemeKind[];
+
 export interface Theme {
   readonly id: string;
   readonly kind: ThemeKind;

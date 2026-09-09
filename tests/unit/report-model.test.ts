@@ -92,7 +92,9 @@ describe('ETBZ-25 D2: every section is bound to facts of this chart', () => {
     const model = knownTimeModel();
     const chain = buildNarrativeChain(model);
     const report = reportFor(model);
-    const themesById = new Map(chain.themeGraph.themes.map((theme) => [theme.id, theme]));
+    const themesById = new Map(
+      chain.primaryThemeProjection.primaryThemes.map((theme) => [theme.id, theme]),
+    );
 
     expect(report.interpretation.length).toBeGreaterThanOrEqual(2);
     for (const section of report.interpretation) {
@@ -105,6 +107,52 @@ describe('ETBZ-25 D2: every section is bound to facts of this chart', () => {
         expect(theme?.factIds).toContain(factId);
       }
     }
+  });
+
+  it('publishes one section per PRIMARY theme, not one per candidate theme', () => {
+    const model = knownTimeModel();
+    const chain = buildNarrativeChain(model);
+    const report = reportFor(model);
+
+    expect(report.interpretation.map((section) => section.themeId)).toEqual(
+      chain.primaryThemeProjection.primaryThemes.map((theme) => theme.id),
+    );
+    // The distinction is real on this chart: the candidate graph carries many
+    // more nodes than the report carries chapters.
+    expect(chain.themeGraph.themes.length).toBeGreaterThan(report.interpretation.length);
+    expect(report.interpretation.length).toBeLessThanOrEqual(
+      chain.brief.constraints.specificity.maxSections,
+    );
+    expect(report.interpretation.length).toBeGreaterThanOrEqual(
+      chain.brief.constraints.specificity.minSections,
+    );
+  });
+
+  it('carries the candidate themes each chapter groups, with their source labels', () => {
+    const model = knownTimeModel();
+    const chain = buildNarrativeChain(model);
+    const report = reportFor(model);
+    const candidatesById = new Map(chain.themeGraph.themes.map((theme) => [theme.id, theme]));
+
+    for (const section of report.interpretation) {
+      expect(section.sourceThemeIds.length, section.themeId).toBeGreaterThan(0);
+      expect(section.sourceThemeLabels.length).toBe(section.sourceThemeIds.length);
+      section.sourceThemeIds.forEach((sourceId, index) => {
+        // The label is the candidate theme's own, which theme-graph.ts has
+        // already tied back to a HoroscopeModel value: no ETBZ step in between.
+        expect(section.sourceThemeLabels[index], sourceId).toBe(
+          candidatesById.get(sourceId)?.label,
+        );
+      });
+    }
+  });
+
+  it('binds the report to the primary projection it was built from', () => {
+    const model = knownTimeModel();
+
+    expect(reportFor(model).provenance.primaryThemeProjectionStructuralHash).toBe(
+      buildNarrativeChain(model).primaryThemeProjection.structuralHash,
+    );
   });
 
   it('records which provider produced the interpretation', () => {
@@ -176,6 +224,17 @@ describe('ETBZ-25 D3: the report hash is deterministic and sensitive', () => {
     expect(drifted.provenance.themeGraphStructuralHash).not.toBe(
       base.provenance.themeGraphStructuralHash,
     );
+  });
+
+  it('carries duplicate and unknown warning codes into the report in source order', () => {
+    // FuFirE's array is EVIDENCE, and it survives the primary projection
+    // unchanged: no deduplication, no sorting, no reclassification of a code
+    // ETBZ does not recognise.
+    const warnings = ['DAY_ANCHOR_UNVERIFIED', 'AN_UNKNOWN_CODE', 'DAY_ANCHOR_UNVERIFIED'];
+    const model = knownTimeModel({ natal: { warnings } });
+
+    expect(model.sourceWarnings).toEqual(warnings);
+    expect(reportFor(model).uncertainty.sourceWarnings).toEqual(warnings);
   });
 
   it('changes when a source warning changes', () => {

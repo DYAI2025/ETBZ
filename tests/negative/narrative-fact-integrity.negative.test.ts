@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { normalizeForMatch } from '../../src/application/interpretation/chart-symbol-lexicon.js';
 import { composeDeterministicNarrative } from '../../src/application/interpretation/deterministic-narrative-provider.js';
 import { ReportError } from '../../src/application/interpretation/errors.js';
 import type { ReportErrorCode } from '../../src/application/interpretation/errors.js';
@@ -77,6 +78,7 @@ function expectRefusal(
 
 const KNOWN = knownTimeModel();
 const KNOWN_CHAIN = buildNarrativeChain(KNOWN);
+const KNOWN_FACTS_BY_ID = new Map(KNOWN_CHAIN.featureSet.facts.map((fact) => [fact.id, fact]));
 const UNKNOWN = unknownTimeModel();
 const UNKNOWN_CHAIN = buildNarrativeChain(UNKNOWN);
 
@@ -161,10 +163,10 @@ describe('ETBZ-25 E2: structurally malformed provider output is refused', () => 
 
 describe('ETBZ-25 E3: a provider may not change a chart fact', () => {
   it.each([
-    ['a pillar stem', 'theme.pillar.year', 'chart.pillar.year.stem', 'Ren'],
-    ['the day master', 'theme.dayMaster', 'chart.dayMaster.stem', 'Geng'],
-    ['a Ten God', 'theme.tenGod.SevenKilling', 'chart.natal.pillar.year.hiddenStem.0.tenGod', 'DirectWealth'],
-    ['a Wu Xing weight', 'theme.wuXing.Feuer', 'chart.wuxing.weight.Feuer', '9.9'],
+    ['a pillar stem', 'primary.positional_context', 'chart.pillar.year.stem', 'Ren'],
+    ['the day master', 'primary.self_role', 'chart.dayMaster.stem', 'Geng'],
+    ['a Ten God', 'primary.self_role', 'chart.natal.pillar.year.hiddenStem.0.tenGod', 'DirectWealth'],
+    ['a Wu Xing weight', 'primary.elemental_profile', 'chart.wuxing.weight.Feuer', '9.9'],
   ])('refuses a report whose provider restates %s with a different value', (
     _label,
     themeId,
@@ -179,7 +181,7 @@ describe('ETBZ-25 E3: a provider may not change a chart fact', () => {
 
   it('refuses a citation of a fact this chart does not have', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.pillar.year').citedFacts.push({
+    sectionOf(output, 'primary.positional_context').citedFacts.push({
       factId: 'chart.pillar.year.doesNotExist',
       value: 'Geng',
     });
@@ -189,7 +191,7 @@ describe('ETBZ-25 E3: a provider may not change a chart fact', () => {
 
   it('refuses a citation of a real fact that belongs to a different theme', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.wuXing.Erde').citedFacts.push({
+    sectionOf(output, 'primary.elemental_profile').citedFacts.push({
       factId: 'chart.pillar.year.stem',
       value: 'Geng',
     });
@@ -199,14 +201,14 @@ describe('ETBZ-25 E3: a provider may not change a chart fact', () => {
 
   it('refuses a section that names a theme this chart does not have', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.dayMaster').themeId = 'theme.inventedByTheProvider';
+    sectionOf(output, 'primary.self_role').themeId = 'theme.inventedByTheProvider';
 
     expectRefusal('REPORT_UNKNOWN_THEME', KNOWN, KNOWN_CHAIN.brief, output);
   });
 
   it('refuses the same theme narrated twice', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    output.sections.push(structuredClone(sectionOf(output, 'theme.dayMaster')));
+    output.sections.push(structuredClone(sectionOf(output, 'primary.self_role')));
 
     expectRefusal('REPORT_DUPLICATE_THEME_SECTION', KNOWN, KNOWN_CHAIN.brief, output);
   });
@@ -244,13 +246,20 @@ describe('ETBZ-25 E3b: the protection is exhaustive, not sampled', () => {
     // would turn a correct test red. A flaky gate is not a gate.
   }, 120_000);
 
-  it('refuses EVERY dropped-citation mutation the whole report can carry', () => {
+  it('accepts a dropped citation ONLY while another citation still carries its value', () => {
     // Removing a citation is the other half: a provider that keeps the prose
     // but quietly stops pointing at a fact must not get a report either,
     // because the prose still names the symbol it no longer cites.
+    //
+    // Not every dropped citation can fail, and pinning a pass-rate would be an
+    // arbitrary number. The INVARIANT is asserted instead: a report survives a
+    // dropped citation exactly when the dropped value is still covered by
+    // another citation of the same section. Every acceptance is checked against
+    // that, so an acceptance the guard should have refused fails this test.
     const reference = draftFor(KNOWN_CHAIN.brief);
     let checked = 0;
     let refused = 0;
+    let stillCovered = 0;
 
     for (let s = 0; s < reference.sections.length; s += 1) {
       const section = reference.sections[s];
@@ -262,6 +271,17 @@ describe('ETBZ-25 E3b: the protection is exhaustive, not sampled', () => {
         const dropped = mutated.citedFacts[c];
         if (dropped === undefined) continue;
         mutated.citedFacts.splice(c, 1);
+        // The covered set the report will compute for the section AFTER the
+        // drop: values and source labels of the remaining cited facts, folded
+        // exactly as the symbol guard folds them.
+        const remaining = new Set<string>();
+        for (const cited of mutated.citedFacts) {
+          const fact = KNOWN_FACTS_BY_ID.get(cited.factId);
+          if (fact === undefined) continue;
+          remaining.add(normalizeForMatch(fact.value));
+          if (fact.sourceLabel !== null) remaining.add(normalizeForMatch(fact.sourceLabel));
+        }
+        const valueStillCovered = remaining.has(normalizeForMatch(dropped.value));
         checked += 1;
         try {
           buildReportModel({
@@ -269,6 +289,11 @@ describe('ETBZ-25 E3b: the protection is exhaustive, not sampled', () => {
             brief: KNOWN_CHAIN.brief,
             providerOutput: output,
           });
+          expect(
+            valueStillCovered,
+            `${mutated.themeId} accepted after dropping ${dropped.factId} (${dropped.value})`,
+          ).toBe(true);
+          stillCovered += 1;
         } catch (error) {
           if (!(error instanceof ReportError)) throw error;
           // Either half of the "if you write it, cite it" rule may fire: the
@@ -281,35 +306,33 @@ describe('ETBZ-25 E3b: the protection is exhaustive, not sampled', () => {
     }
 
     expect(checked).toBeGreaterThan(50);
-    // Not every dropped citation must fail: a fact whose value and label are
-    // also carried by another cited fact of the same section leaves the prose
-    // fully covered, and refusing that would be a false alarm rather than
-    // integrity. What must hold is that the guard bites on the large majority
-    // and that it is never silent when the symbol really loses its citation.
+    // BOTH branches must have been exercised: a run in which everything was
+    // refused, or everything accepted, would satisfy the invariant vacuously.
     expect(refused).toBeGreaterThan(0);
-    expect(refused / checked).toBeGreaterThan(0.5);
+    expect(stillCovered).toBeGreaterThan(0);
+    expect(refused + stillCovered).toBe(checked);
   }, 120_000);
 });
 
 describe('ETBZ-25 E4: interpretation without a fact basis is refused', () => {
   it('refuses a section that cites nothing', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.dayMaster').citedFacts = [];
+    sectionOf(output, 'primary.self_role').citedFacts = [];
 
     expectRefusal('REPORT_UNGROUNDED_INTERPRETATION', KNOWN, KNOWN_CHAIN.brief, output);
   });
 
   it('refuses a section that carries no prose', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.dayMaster').prose = '   \n  ';
+    sectionOf(output, 'primary.self_role').prose = '   \n  ';
 
     expectRefusal('REPORT_UNGROUNDED_INTERPRETATION', KNOWN, KNOWN_CHAIN.brief, output);
   });
 
   it('refuses prose that names a chart symbol the section did not cite', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    // "Geng" is a real stem of this chart, but not a fact of the Erde theme.
-    const section = sectionOf(output, 'theme.wuXing.Erde');
+    // "Geng" is a real stem of this chart, but not a fact of the elemental theme.
+    const section = sectionOf(output, 'primary.elemental_profile');
     section.prose = `${section.prose} Der Stamm Geng gehoert dazu.`;
 
     expectRefusal('REPORT_UNCITED_SYMBOL', KNOWN, KNOWN_CHAIN.brief, output);
@@ -317,7 +340,7 @@ describe('ETBZ-25 E4: interpretation without a fact basis is refused', () => {
 
   it('refuses prose that invents a symbol no chart carries', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.wuXing.Erde');
+    const section = sectionOf(output, 'primary.elemental_profile');
     // A stem that is not in this chart at all.
     section.prose = `${section.prose} Auch Gui zeigt sich hier.`;
 
@@ -333,7 +356,7 @@ describe('ETBZ-25 E4b: prose may not assert a chart value the section did not ci
 
   it('refuses a prose sentence that states a Wu Xing weight the chart does not carry', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.wuXing.Feuer');
+    const section = sectionOf(output, 'primary.elemental_profile');
     // The section cites the real weight; the SENTENCE claims a different one.
     section.prose = `${section.prose} Feuer erreicht den Wert 9.9.`;
 
@@ -342,7 +365,7 @@ describe('ETBZ-25 E4b: prose may not assert a chart value the section did not ci
 
   it('accepts a prose sentence that states the weight the section actually cites', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.wuXing.Feuer');
+    const section = sectionOf(output, 'primary.elemental_profile');
     const cited = citationOf(section, 'chart.wuxing.weight.Feuer');
     expect(cited.value).toBe('2.5');
     section.prose = `${section.prose} Der Wert betraegt 2.5.`;
@@ -354,7 +377,7 @@ describe('ETBZ-25 E4b: prose may not assert a chart value the section did not ci
 
   it('refuses a prose sentence that asserts the opposite polarity', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.dayMaster');
+    const section = sectionOf(output, 'primary.self_role');
     // The chart's day master polarity is yin; the sentence says yang.
     section.prose = `${section.prose} Die Polaritaet ist yang.`;
 
@@ -363,8 +386,9 @@ describe('ETBZ-25 E4b: prose may not assert a chart value the section did not ci
 
   it('refuses a prose sentence that asserts a Qi role the branch does not carry', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.pillar.day');
-    // The day branch carries a principal and a central hidden stem, no residual.
+    const section = sectionOf(output, 'primary.seasonal_anchor');
+    // The seasonal anchor cites the month command and the month branch; it
+    // carries no hidden stem at all, so no Qi role of any kind.
     section.prose = `${section.prose} Das residual Qi traegt die Karte.`;
 
     expectRefusal('REPORT_UNCITED_SYMBOL', KNOWN, KNOWN_CHAIN.brief, output);
@@ -379,7 +403,7 @@ describe('ETBZ-25 E4c: the symbol guard cannot be dodged by rewriting the charac
     ['a soft hyphen inside the word', 'Ge\u00ADng'],
   ])('refuses an uncited stem written with %s', (_label, spelling) => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.wuXing.Erde');
+    const section = sectionOf(output, 'primary.elemental_profile');
     section.prose = `${section.prose} Auch ${spelling} zeigt sich.`;
 
     expectRefusal('REPORT_UNCITED_SYMBOL', KNOWN, KNOWN_CHAIN.brief, output);
@@ -387,7 +411,7 @@ describe('ETBZ-25 E4c: the symbol guard cannot be dodged by rewriting the charac
 
   it('refuses an uncited Han character (the CJK half of the guard, on its own)', () => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.wuXing.Erde');
+    const section = sectionOf(output, 'primary.elemental_profile');
     section.prose = `${section.prose} Das Zeichen 庚 steht dafuer.`;
 
     expectRefusal('REPORT_UNCITED_SYMBOL', KNOWN, KNOWN_CHAIN.brief, output);
@@ -400,7 +424,7 @@ describe('ETBZ-25 E5: a narrative may not claim a method this slice does not eva
     // ASCII space would let the term through in exactly the shape a line break
     // creates.
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.dayMaster');
+    const section = sectionOf(output, 'primary.self_role');
     section.prose = `${section.prose} Das Yong\u00A0Shen ist eindeutig.`;
 
     expectRefusal('REPORT_OUT_OF_METHOD_SCOPE', KNOWN, KNOWN_CHAIN.brief, output);
@@ -414,7 +438,7 @@ describe('ETBZ-25 E5: a narrative may not claim a method this slice does not eva
     ['symbolic stars', 'Ein Shen Sha verstaerkt das Bild.'],
   ])('refuses prose that invokes %s', (_label, sentence) => {
     const output = draftFor(KNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.dayMaster');
+    const section = sectionOf(output, 'primary.self_role');
     section.prose = `${section.prose} ${sentence}`;
 
     expectRefusal('REPORT_OUT_OF_METHOD_SCOPE', KNOWN, KNOWN_CHAIN.brief, output);
@@ -424,7 +448,7 @@ describe('ETBZ-25 E5: a narrative may not claim a method this slice does not eva
 describe('ETBZ-25 E6: provisionality may not be dropped on the way to the report', () => {
   it('refuses a section that leans on a provisional fact and states no uncertainty', () => {
     const output = draftFor(UNKNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.pillar.hour');
+    const section = sectionOf(output, 'primary.positional_context');
     expect(section.uncertaintyNotes.length).toBeGreaterThan(0);
     section.uncertaintyNotes = [];
 
@@ -433,7 +457,7 @@ describe('ETBZ-25 E6: provisionality may not be dropped on the way to the report
 
   it('refuses a blank uncertainty note as if it were absent', () => {
     const output = draftFor(UNKNOWN_CHAIN.brief);
-    sectionOf(output, 'theme.pillar.hour').uncertaintyNotes = ['   '];
+    sectionOf(output, 'primary.positional_context').uncertaintyNotes = ['   '];
 
     expectRefusal('REPORT_PROVISIONAL_WITHOUT_NOTE', UNKNOWN, UNKNOWN_CHAIN.brief, output);
   });
@@ -443,7 +467,7 @@ describe('ETBZ-25 E6: provisionality may not be dropped on the way to the report
     // chart facts, so it is exactly as capable of smuggling a claim as a
     // paragraph is. Guarding only `prose` would leave this channel open.
     const output = draftFor(UNKNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.pillar.hour');
+    const section = sectionOf(output, 'primary.positional_context');
     section.uncertaintyNotes = [
       ...section.uncertaintyNotes,
       'Das Yong Shen bleibt davon unberuehrt.',
@@ -454,8 +478,8 @@ describe('ETBZ-25 E6: provisionality may not be dropped on the way to the report
 
   it('refuses an uncertainty note that names an uncited chart symbol', () => {
     const output = draftFor(UNKNOWN_CHAIN.brief);
-    const section = sectionOf(output, 'theme.pillar.hour');
-    // "Geng" is a real stem of this chart, but not a fact of the hour theme.
+    const section = sectionOf(output, 'primary.elemental_profile');
+    // "Geng" is a real stem of this chart, but not a fact of the elemental theme.
     section.uncertaintyNotes = [
       ...section.uncertaintyNotes,
       'Der Stamm Geng bleibt hiervon unberuehrt.',

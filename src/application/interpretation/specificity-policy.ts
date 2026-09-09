@@ -1,5 +1,5 @@
 /**
- * ETBZ-25 — the first structural QA gate for specificity and synthesis.
+ * ETBZ-25 — the first structural QA gate for specificity, synthesis and SIZE.
  *
  * The commercial failure mode of a generated report is not a wrong sentence; it
  * is a TRUE sentence that would fit any chart. This policy is the smallest
@@ -13,8 +13,16 @@
  * a report that satisfies this policy cannot consist of unbound generic
  * paragraphs, because every section is bound to cited facts of this chart.
  *
- * The thresholds are deliberately low. This is a floor that a generic text
- * fails, not a target that good text has to strain for.
+ * `minSections` / `maxSections` are the ETBZ-25 product contract for a COMPACT
+ * report: roughly three to five customer-facing chapters, each one a primary
+ * theme. The ceiling is what stops the exhaustive candidate ThemeGraph from
+ * leaking into the sold artefact one chapter per candidate node; the floor is
+ * what stops a single-paragraph "reading". Neither bound expresses an
+ * astrological opinion about how many themes a chart "has" — the candidate
+ * graph keeps every one of them, and nothing is discarded to satisfy a count.
+ *
+ * The other thresholds are deliberately low. They are a floor that a generic
+ * text fails, not a target that good text has to strain for.
  */
 export interface SpecificityPolicy {
   /**
@@ -26,6 +34,16 @@ export interface SpecificityPolicy {
    * second spelling of this one and could never fail on its own.
    */
   readonly minSections: number;
+  /**
+   * Maximum number of interpretation sections in a report.
+   *
+   * Enforced BEFORE the per-section checks in `report-model.ts`, on the raw
+   * section count alone: an oversized report is a violation of the product
+   * contract in its own right, and naming it as such is more honest than
+   * letting whichever duplicate or unknown theme happens to come first report
+   * an incidental symptom.
+   */
+  readonly maxSections: number;
   /** Minimum number of DISTINCT chart facts cited across the whole report. */
   readonly minDistinctCitedFacts: number;
   /** Minimum number of sections that combine several kinds of fact. */
@@ -42,7 +60,8 @@ export interface SpecificityPolicy {
  */
 
 export const SPECIFICITY_POLICY: SpecificityPolicy = {
-  minSections: 2,
+  minSections: 3,
+  maxSections: 5,
   minDistinctCitedFacts: 4,
   minSynthesisSections: 1,
   minSynthesisFactKinds: 2,

@@ -14,6 +14,17 @@
  * `report-model.ts`: cite what you use, change nothing, claim no method that is
  * not evaluated, and never let a provisional fact lose its provisionality.
  *
+ * It emits ONE SECTION PER PRIMARY THEME, never one per candidate ThemeGraph
+ * node. The candidate graph is in the brief and this provider may read it, but
+ * a chapter is a primary theme — which is also the only shape `report-model.ts`
+ * accepts, so the two cannot drift apart.
+ *
+ * The heading names the primary family by its machine id (`self_role`,
+ * `seasonal_anchor`, …) rather than a German phrase. That is deliberate: a
+ * translated heading would be an ETBZ-authored label sitting where the source's
+ * own words belong, and this provider coins nothing. The candidate themes' own
+ * source-owned labels travel structurally in `sourceThemeLabels`.
+ *
  * It deliberately does NOT restate FuFirE's warning codes. Those are
  * source-owned evidence and travel in the report's uncertainty block; a
  * provider echoing them would turn evidence into prose.
@@ -27,11 +38,14 @@ import type {
 } from '../ports/narrative-provider.js';
 import type { ChartFact } from './feature-set.js';
 import type { NarrativeBrief } from './narrative-brief.js';
-import type { Theme } from './theme-graph.js';
+import type { PrimaryTheme } from './primary-theme.js';
 
 export const DETERMINISTIC_NARRATIVE_PROVIDER_ID = 'etbz-25.deterministic-structural-provider';
 
-function citationsFor(theme: Theme, factsById: ReadonlyMap<string, ChartFact>): NarrativeCitation[] {
+function citationsFor(
+  theme: PrimaryTheme,
+  factsById: ReadonlyMap<string, ChartFact>,
+): NarrativeCitation[] {
   const citations: NarrativeCitation[] = [];
   for (const factId of theme.factIds) {
     const fact = factsById.get(factId);
@@ -48,18 +62,18 @@ function citationsFor(theme: Theme, factsById: ReadonlyMap<string, ChartFact>): 
 /**
  * Sentence assembly.
  *
- * Every chart symbol it can emit — the theme label and the cited values — is by
- * construction one the section also cites, which is what lets the same prose
- * pass the uncited-symbol guard that a real provider will have to pass.
+ * Every chart symbol it can emit is by construction one the section also cites,
+ * which is what lets the same prose pass the uncited-symbol guard that a real
+ * provider will have to pass. The family id carries no chart symbol at all.
  */
-function proseFor(theme: Theme, citations: readonly NarrativeCitation[]): string {
+function proseFor(theme: PrimaryTheme, citations: readonly NarrativeCitation[]): string {
   const values = [...new Set(citations.map((citation) => citation.value))].sort();
   // No count: a number in prose must be a cited fact value
   // (`constraints.numeralsMustBeCited`), and a section's cardinality is not one.
-  return `Thema ${theme.label}: belegt durch die folgenden Faktbezüge dieser Karte (${values.join(', ')}).`;
+  return `Primärthema ${theme.family}: belegt durch die folgenden Faktbezüge dieser Karte (${values.join(', ')}).`;
 }
 
-function notesFor(theme: Theme, provisionalFields: readonly string[]): readonly string[] {
+function notesFor(theme: PrimaryTheme, provisionalFields: readonly string[]): readonly string[] {
   if (!theme.containsProvisionalFacts) {
     return [];
   }
@@ -84,15 +98,17 @@ export function composeDeterministicNarrative(brief: NarrativeBrief): NarrativeP
       ...brief.uncertainty.provisionalFields.natal,
     ]),
   ].sort();
-  const sections: NarrativeSectionDraft[] = brief.themes.map((theme): NarrativeSectionDraft => {
-    const citedFacts = citationsFor(theme, factsById);
-    return {
-      themeId: theme.id,
-      citedFacts,
-      prose: proseFor(theme, citedFacts),
-      uncertaintyNotes: notesFor(theme, provisionalFields),
-    };
-  });
+  const sections: NarrativeSectionDraft[] = brief.primaryThemes.map(
+    (theme): NarrativeSectionDraft => {
+      const citedFacts = citationsFor(theme, factsById);
+      return {
+        themeId: theme.id,
+        citedFacts,
+        prose: proseFor(theme, citedFacts),
+        uncertaintyNotes: notesFor(theme, provisionalFields),
+      };
+    },
+  );
 
   return {
     providerId: DETERMINISTIC_NARRATIVE_PROVIDER_ID,

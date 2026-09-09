@@ -8,6 +8,20 @@
  * receives the model's canonical text, and therefore has no channel through
  * which an unlisted chart value could enter a report.
  *
+ * The brief states the themes at TWO levels, and keeps them apart on purpose:
+ *
+ *   primaryThemes    the four v1 grouping families. These, and only these, may
+ *                    become customer-facing sections.
+ *   candidateThemes  the complete structural ThemeGraph, plus its edges. Every
+ *                    candidate node is preserved and reachable as nuance — a
+ *                    provider may read them freely — but naming one as a report
+ *                    section is refused in `report-model.ts`.
+ *
+ * Nothing is dropped between the two levels: every candidate theme belongs to
+ * exactly one primary family, and the primary themes' fact union is the union
+ * of the candidates'. The split is about what a chapter may be, never about
+ * which parts of the chart count.
+ *
  * `constraints` states the obligations the provider's answer will be held to.
  * Nothing here is advisory: every field is re-checked in `report-model.ts`
  * against the HoroscopeModel itself, so a provider that ignores the brief
@@ -25,6 +39,8 @@ import { deriveInterpretationFeatureSet } from './feature-set.js';
 import type { ChartFact, InterpretationFeatureSet } from './feature-set.js';
 import type { MethodNote } from './method-scope.js';
 import { NOT_EVALUATED_METHOD_IDS } from './method-scope.js';
+import { buildPrimaryThemeProjection } from './primary-theme.js';
+import type { PrimaryTheme, PrimaryThemeProjection } from './primary-theme.js';
 import { SPECIFICITY_POLICY } from './specificity-policy.js';
 import type { SpecificityPolicy } from './specificity-policy.js';
 import { buildThemeGraph } from './theme-graph.js';
@@ -33,8 +49,18 @@ import type { Theme, ThemeEdge, ThemeGraph } from './theme-graph.js';
 export interface NarrativeBriefConstraints {
   /** The only fact ids a section may cite. */
   readonly allowedFactIds: readonly string[];
-  /** The only theme ids a section may claim. */
-  readonly allowedThemeIds: readonly string[];
+  /**
+   * The only theme ids a section may claim: the PRIMARY themes.
+   *
+   * A report chapter is a primary theme or it is refused. This is what keeps
+   * the sold artefact compact while the candidate graph stays complete.
+   */
+  readonly narratableThemeIds: readonly string[];
+  /**
+   * The candidate ThemeGraph ids. Available to READ as structural nuance and
+   * explicitly NOT narratable: a section naming one of these is refused.
+   */
+  readonly candidateThemeIds: readonly string[];
   /** Methods whose vocabulary must not appear in prose (`not_evaluated`). */
   readonly forbiddenMethodIds: readonly string[];
   /** Every section must cite at least one fact; stated so it is not implicit. */
@@ -56,10 +82,14 @@ export interface NarrativeBrief {
   readonly sourceStructuralHash: string;
   readonly featureSetStructuralHash: string;
   readonly themeGraphStructuralHash: string;
+  readonly primaryThemeProjectionStructuralHash: string;
   readonly subject: Readonly<{ displayName: string; birthTimeKnown: boolean }>;
   readonly facts: readonly ChartFact[];
-  readonly themes: readonly Theme[];
-  readonly edges: readonly ThemeEdge[];
+  /** The narratable layer: exactly the v1 primary families of this chart. */
+  readonly primaryThemes: readonly PrimaryTheme[];
+  /** The complete structural candidate graph. Nuance, never a chapter. */
+  readonly candidateThemes: readonly Theme[];
+  readonly candidateEdges: readonly ThemeEdge[];
   readonly uncertainty: Readonly<{
     birthTimeKnown: boolean;
     provisionalFields: Readonly<{ bazi: readonly string[]; natal: readonly string[] }>;
@@ -72,16 +102,18 @@ export interface NarrativeBrief {
   readonly structuralHash: string;
 }
 
-/** The three derived artefacts of one chart, produced together and in order. */
+/** The four derived artefacts of one chart, produced together and in order. */
 export interface NarrativeChain {
   readonly featureSet: InterpretationFeatureSet;
   readonly themeGraph: ThemeGraph;
+  readonly primaryThemeProjection: PrimaryThemeProjection;
   readonly brief: NarrativeBrief;
 }
 
 export function buildNarrativeBrief(
   featureSet: InterpretationFeatureSet,
   themeGraph: ThemeGraph,
+  primaryThemeProjection: PrimaryThemeProjection,
   subject: Readonly<{ displayName: string }>,
 ): NarrativeBrief {
   const core = {
@@ -89,13 +121,15 @@ export function buildNarrativeBrief(
     sourceStructuralHash: featureSet.sourceStructuralHash,
     featureSetStructuralHash: featureSet.structuralHash,
     themeGraphStructuralHash: themeGraph.structuralHash,
+    primaryThemeProjectionStructuralHash: primaryThemeProjection.structuralHash,
     subject: {
       displayName: subject.displayName,
       birthTimeKnown: featureSet.birthTimeKnown,
     },
     facts: featureSet.facts,
-    themes: themeGraph.themes,
-    edges: themeGraph.edges,
+    primaryThemes: primaryThemeProjection.primaryThemes,
+    candidateThemes: themeGraph.themes,
+    candidateEdges: themeGraph.edges,
     uncertainty: {
       birthTimeKnown: featureSet.birthTimeKnown,
       provisionalFields: featureSet.provisionalFields,
@@ -105,7 +139,8 @@ export function buildNarrativeBrief(
     methodScope: featureSet.methodScope,
     constraints: {
       allowedFactIds: featureSet.factIds,
-      allowedThemeIds: themeGraph.themes.map((theme) => theme.id),
+      narratableThemeIds: primaryThemeProjection.primaryThemes.map((theme) => theme.id),
+      candidateThemeIds: themeGraph.themes.map((theme) => theme.id),
       forbiddenMethodIds: NOT_EVALUATED_METHOD_IDS,
       citationRequired: true as const,
       provisionalCitationRequiresNote: true as const,
@@ -119,14 +154,15 @@ export function buildNarrativeBrief(
 
 /**
  * The whole free, deterministic half of ETBZ-25 in one call: HoroscopeModel in,
- * feature set + theme graph + brief out. Pure — no clock, no randomness, no
- * network, no provider.
+ * feature set + theme graph + primary projection + brief out. Pure — no clock,
+ * no randomness, no network, no provider.
  */
 export function buildNarrativeChain(model: HoroscopeModel): NarrativeChain {
   const featureSet = deriveInterpretationFeatureSet(model);
   const themeGraph = buildThemeGraph(featureSet);
-  const brief = buildNarrativeBrief(featureSet, themeGraph, {
+  const primaryThemeProjection = buildPrimaryThemeProjection(featureSet, themeGraph);
+  const brief = buildNarrativeBrief(featureSet, themeGraph, primaryThemeProjection, {
     displayName: model.displayName,
   });
-  return { featureSet, themeGraph, brief };
+  return { featureSet, themeGraph, primaryThemeProjection, brief };
 }

@@ -22,6 +22,15 @@
  * of the candidates'. The split is about what a chapter may be, never about
  * which parts of the chart count.
  *
+ * At BOTH levels the theme metadata is number-free by construction: a theme
+ * names the facts it groups and never how many of them there are. The chart
+ * facts themselves keep every value the source stated, Qi weights included —
+ * those are FuFirE's measurements and removing them would be the real data
+ * loss. What is withheld is any ETBZ-authored number ABOUT a theme, because a
+ * provider — a language model, one day — has no way to tell such a number apart
+ * from a significance the chart never asserted. `tests/negative/
+ * narrative-provider-ranking-signal.negative.test.ts` holds that line.
+ *
  * `constraints` states the obligations the provider's answer will be held to.
  * Nothing here is advisory: every field is re-checked in `report-model.ts`
  * against the HoroscopeModel itself, so a provider that ignores the brief

@@ -106,7 +106,6 @@ describe('ETBZ-25 G2: the projection is derived, never invented', () => {
       for (const factId of primary.provisionalFactIds) {
         expect(primary.factIds, `${primary.id} -> ${factId}`).toContain(factId);
       }
-      expect(primary.supportCount).toBe(primary.factIds.length);
     }
   });
 
@@ -279,7 +278,12 @@ describe('ETBZ-25 G6: nothing in the projection is a ranking', () => {
   it('orders primary themes lexicographically, never by support count', () => {
     const themes = projectionOf().primaryThemes;
     const ids = themes.map((theme) => theme.id);
-    const counts = themes.map((theme) => theme.supportCount);
+    // Measured from the published `factIds`. The primary theme no longer states
+    // a count of its own (ETBZ-25A-R2), so the only way to ask "is this order
+    // support-driven?" is to count the references here — which is exactly the
+    // asymmetry the repair intends: a verifier may count, the artefact may not
+    // hand a count to a provider.
+    const counts = themes.map((theme) => theme.factIds.length);
 
     expect(ids).toEqual([...ids].sort());
     // Proof the order is NOT support-driven: on this chart the published order
@@ -303,7 +307,6 @@ describe('ETBZ-25 G6: nothing in the projection is a ranking', () => {
       'sourceThemeKinds',
       'sourceThemeLabels',
       'statement',
-      'supportCount',
     ]);
   });
 

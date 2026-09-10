@@ -99,10 +99,19 @@ export const PRIMARY_THEME_FAMILIES: readonly PrimaryThemeFamilyDefinition[] = [
  * One primary theme: a family, the candidate themes it groups, and the union of
  * their evidence.
  *
- * `supportCount` is structural cardinality and NOTHING else — the same
- * deliberate non-signal `Theme.supportCount` is. Nothing in this slice orders,
- * selects, weights or filters by it, and the projection carries no score, rank,
- * confidence or prominence field of any kind.
+ * It carries NO number at all. Not a score, not a rank, not a weight, not a
+ * confidence, not a prominence — and, since ETBZ-25A-R2, not a cardinality
+ * either. The fact REFERENCES are published in full; the count of them is not.
+ *
+ * That last removal is the load-bearing one. This structure is handed to a
+ * narrative provider, and a future provider may be a language model: a numeric
+ * field beside a theme is exactly the kind of thing such a consumer reads as
+ * "this theme matters more", however the field is named and however carefully
+ * its doc comment disclaims it. The count was only `factIds.length` — how many
+ * rows FuFirE happened to state — so publishing it invited an importance
+ * reading that the number could not support. A shape with no number in it
+ * cannot be misread that way, which makes this a property of the boundary
+ * rather than of a provider's good behaviour.
  */
 export interface PrimaryTheme {
   readonly id: string;
@@ -118,8 +127,6 @@ export interface PrimaryTheme {
   readonly factIds: readonly string[];
   readonly provisionalFactIds: readonly string[];
   readonly containsProvisionalFacts: boolean;
-  /** Structural cardinality ONLY. Not a strength, not a ranking. */
-  readonly supportCount: number;
   /**
    * The EVALUATED methods whose source facts this theme actually carries.
    *
@@ -245,7 +252,6 @@ function toPrimaryTheme(
     factIds,
     provisionalFactIds,
     containsProvisionalFacts: provisionalFactIds.length > 0,
-    supportCount: factIds.length,
     methodIds: methodIdsFor(factIds, methodScope),
   };
 }

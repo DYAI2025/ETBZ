@@ -85,7 +85,6 @@ describe('ETBZ-25 B2: themes are grounded and unranked', () => {
       for (const factId of theme.factIds) {
         expect(known, `${theme.id} -> ${factId}`).toContain(factId);
       }
-      expect(theme.supportCount).toBe(theme.factIds.length);
     }
   });
 
@@ -116,8 +115,11 @@ describe('ETBZ-25 B2: themes are grounded and unranked', () => {
 
     expect(ids).toEqual([...ids].sort());
     // Proof that the order is NOT support-driven: the sorted order really does
-    // put a smaller theme before a larger one in this chart.
-    const counts = themes.map((theme) => theme.supportCount);
+    // put a smaller theme before a larger one in this chart. The count is
+    // measured HERE, from the published `factIds`; the theme itself no longer
+    // carries one (ETBZ-25A-R2), and this test is where that stays checkable
+    // without the artefact having to state it.
+    const counts = themes.map((theme) => theme.factIds.length);
     expect(counts).not.toEqual([...counts].sort((a, b) => b - a));
   });
 

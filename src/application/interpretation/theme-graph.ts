@@ -12,7 +12,13 @@
  *    not sum the source's Qi weights into a new number — a total nobody
  *    measured would be an invented finding;
  *  - it orders themes lexicographically by id, NOT by size, so that position in
- *    the list cannot be read as prominence.
+ *    the list cannot be read as prominence;
+ *  - it publishes NO cardinality field. A theme states WHICH facts it groups
+ *    (`factIds`) and nothing about how many. A number sitting beside a theme is
+ *    read as salience by whatever consumes it next, and a fact count is not a
+ *    salience the chart supports: a Ten God named twice is not twice as true.
+ *    Cardinality stays derivable from `factIds` for anyone who genuinely needs
+ *    it — derivable is not the same as published.
  *
  * Edges are set intersection and nothing else: two themes are linked when they
  * literally share a fact. That relation is decidable, reproducible and carries
@@ -68,11 +74,9 @@ export interface Theme {
   readonly factIds: readonly string[];
   readonly provisionalFactIds: readonly string[];
   readonly containsProvisionalFacts: boolean;
-  /**
-   * How many facts support the theme. Structural cardinality ONLY — it is not
-   * a strength, a weight or a confidence, and nothing downstream ranks by it.
-   */
-  readonly supportCount: number;
+  // Deliberately no support/fact count: see the module docblock. Every field
+  // above is a string, a string list or a boolean, so a candidate theme carries
+  // no number a consumer could mistake for a ranking.
 }
 
 export interface ThemeEdge {
@@ -118,7 +122,6 @@ function finalize(draft: ThemeDraft): Theme {
     factIds,
     provisionalFactIds,
     containsProvisionalFacts: provisionalFactIds.length > 0,
-    supportCount: factIds.length,
   };
 }
 
@@ -300,7 +303,7 @@ export function buildThemeGraph(featureSet: InterpretationFeatureSet): ThemeGrap
     ...wuXingThemes(facts),
   ];
 
-  // Lexicographic by id. Ordering by supportCount would publish a ranking this
+  // Lexicographic by id. Ordering by fact count would publish a ranking this
   // slice has no basis for.
   const themes = drafts
     .map(finalize)

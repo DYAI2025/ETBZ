@@ -22,11 +22,37 @@
  * evidence to an exact answer without republishing it, and the reading itself
  * lives in the Golden Reading artefact where a human is meant to read it.
  *
- * ON COST. `billableCostEur` is `0`, and `billableCostBasis` states in words
- * HOW that is known. None of the approved routes returns a per-call invoice, so
- * the zero rests on route eligibility — a provider-published zero-price model
- * marker — and not on a billing readback. Saying so is the difference between
- * evidence and a comfortable number.
+ * ON COST: THE RECORD KEEPS POLICY AND OBSERVATION APART.
+ *
+ *  approvedCostCapEur        POLICY. The cap ETBZ approved for this slice, and
+ *  allowPaid                 the fact that no paid path is authorised. Both are
+ *                            decisions, pinned in the type, true regardless of
+ *                            what any provider reports.
+ *
+ *  reportedCost (per attempt) OBSERVATION. What a provider said the call cost,
+ *                            verbatim and un-converted. `null` when it said
+ *                            nothing, which is the ordinary case: three of the
+ *                            four approved routes return no cost field at all.
+ *
+ *  observedBillableCostEur   OBSERVATION, reduced to the currency the cap is
+ *                            written in. `null` when no provider reported a
+ *                            cost, or when what they reported cannot be stated
+ *                            in EUR without an exchange rate ETBZ would have to
+ *                            invent.
+ *
+ *  observedCostBasis         WHY the field above holds what it holds.
+ *
+ * These were one field. The record published `billableCostEur: 0` for every run,
+ * and that zero came from the free-model MARKER in a model id — a defensive
+ * eligibility guard, not an invoice. A reader had no way to tell it from a
+ * measured zero. The type no longer allows that: the observation is nullable and
+ * `buildRunEvidence` cannot synthesize one, so an unobserved cost can only ever
+ * be recorded as unobserved.
+ *
+ * Fail-closed is unchanged and now applies to the observation too:
+ * `assertObservedCostWithinCap` refuses a record in which a provider reported
+ * any non-zero amount, in any currency — so a cost ETBZ cannot express in EUR
+ * cannot hide behind a `null`.
  */
 
 import { canonicalJson } from '../../domain/canonical-json.js';
@@ -50,6 +76,20 @@ export interface EvidenceUsage {
   readonly totalTokens: number | null;
 }
 
+/**
+ * A provider-reported cost, mirrored into the application layer.
+ *
+ * Declared here rather than imported from the adapter for the same reason
+ * `EvidenceUsage` is: `application -> adapters` is the one direction the
+ * architecture guard forbids. Structural typing makes the adapter's own
+ * `ReportedCost` satisfy this, so the two cannot drift without a compile error.
+ */
+export interface EvidenceReportedCost {
+  readonly amount: number;
+  readonly currency: string | null;
+  readonly source: string;
+}
+
 export interface EvidenceRouteAttempt {
   readonly order: number;
   readonly routeId: string;
@@ -62,7 +102,8 @@ export interface EvidenceRouteAttempt {
   readonly responseId: string | null;
   readonly responseHash: string | null;
   readonly finishReason: string | null;
-  readonly billableCostEur: 0;
+  /** What the provider reported. `null` means it reported nothing. Not zero. */
+  readonly reportedCost: EvidenceReportedCost | null;
 }
 
 export interface EvidenceRouteVerdict {
@@ -85,7 +126,9 @@ export interface NarrativeRunEvidence {
   readonly promptVersion: string;
   readonly policyVersion: string;
   readonly qaVersion: string;
-  readonly billableCostCapEur: 0;
+  /** POLICY: the cap ETBZ approved. Not configurable in this slice. */
+  readonly approvedCostCapEur: 0;
+  /** POLICY: no paid provider path is authorised. */
   readonly allowPaid: false;
   readonly routeVerdicts: readonly EvidenceRouteVerdict[];
   readonly attempts: readonly EvidenceRouteAttempt[];
@@ -97,9 +140,15 @@ export interface NarrativeRunEvidence {
   readonly semanticQaFindings: readonly NarrativeQaFinding[];
   readonly goldenReadingStatus: 'CANDIDATE_READY_FOR_HUMAN_REVIEW' | 'BLOCKED' | 'NOT_PRODUCED';
   readonly goldenReadingHash: string | null;
-  readonly billableCostEur: 0;
-  /** How the zero above is known. Never a bare number without its basis. */
-  readonly billableCostBasis: string;
+  /**
+   * OBSERVATION: the cost providers actually reported, in EUR.
+   *
+   * `null` is the expected value and means NOT OBSERVED. It is deliberately not
+   * `0`: a zero here is a claim that something was measured.
+   */
+  readonly observedBillableCostEur: number | null;
+  /** Why the field above holds what it holds. Never a bare number alone. */
+  readonly observedCostBasis: string;
   readonly canonicalJson: string;
   readonly structuralHash: string;
 }
@@ -204,9 +253,91 @@ export function assertEvidenceSanitized(
   }
 }
 
+/**
+ * Reduces what the providers reported to the currency the cap is written in.
+ *
+ * FOUR ANSWERS, and the boundaries between them are the point:
+ *
+ *  - nobody reported anything            -> `null`. NOT OBSERVED.
+ *  - every report is exactly zero        -> `0`. A genuine observation: zero is
+ *                                          the same amount in every currency, so
+ *                                          an unlabelled reported zero is still
+ *                                          a zero in EUR.
+ *  - every report is labelled EUR        -> their sum.
+ *  - anything else (a non-zero amount in
+ *    an unstated or other currency)      -> `null`, because stating it in EUR
+ *                                          would need an exchange rate ETBZ
+ *                                          invented. That `null` is not a way
+ *                                          out: `assertObservedCostWithinCap`
+ *                                          refuses the record outright.
+ */
+export function observedBillableCostEurFrom(
+  attempts: readonly EvidenceRouteAttempt[],
+): number | null {
+  const reports = attempts
+    .map((attempt) => attempt.reportedCost)
+    .filter((cost): cost is EvidenceReportedCost => cost !== null);
+  if (reports.length === 0) {
+    return null;
+  }
+  if (reports.every((cost) => cost.amount === 0)) {
+    return 0;
+  }
+  if (reports.every((cost) => cost.currency?.toUpperCase() === 'EUR')) {
+    return reports.reduce((total, cost) => total + cost.amount, 0);
+  }
+  return null;
+}
+
+export class ObservedCostExceedsCapError extends Error {
+  readonly code: 'OBSERVED_COST_EXCEEDS_CAP';
+  readonly reported: readonly EvidenceReportedCost[];
+  constructor(reported: readonly EvidenceReportedCost[]) {
+    super(
+      `a provider reported a non-zero cost for this run; the approved ETBZ-25B development cap is 0.00 EUR and a run that cost money is refused rather than recorded: ${reported
+        .map((cost) => `${String(cost.amount)} ${cost.currency ?? 'unlabelled'} (${cost.source})`)
+        .join(', ')}`,
+    );
+    this.name = 'ObservedCostExceedsCapError';
+    this.code = 'OBSERVED_COST_EXCEEDS_CAP';
+    this.reported = reported;
+  }
+}
+
+/**
+ * Refuses a record in which a provider reported a non-zero cost.
+ *
+ * Checks the RAW REPORTS, not `observedBillableCostEur`. Reading the reduced
+ * field would let the one case that most needs refusing slip through: a non-zero
+ * amount in a currency ETBZ cannot convert reduces to `null`, and a guard that
+ * asked "is the EUR figure above the cap?" would read that `null` as nothing to
+ * see. A cost ETBZ cannot express is still a cost.
+ *
+ * Currency-blind on purpose. No non-zero amount is acceptable under a 0.00 cap
+ * in any denomination, so the guard never needs a rate to decide.
+ */
+export function assertObservedCostWithinCap(evidence: NarrativeRunEvidence): void {
+  const charged = evidence.attempts
+    .map((attempt) => attempt.reportedCost)
+    .filter((cost): cost is EvidenceReportedCost => cost !== null)
+    .filter((cost) => cost.amount !== 0);
+  if (charged.length > 0) {
+    throw new ObservedCostExceedsCapError(charged);
+  }
+}
+
+/**
+ * What the caller must supply, and what it deliberately may not.
+ *
+ * `observedBillableCostEur` is IN this input type. That is the repair: the
+ * builder used to write it itself, as a literal `0`, which made every record
+ * claim a measurement nobody had taken. The only fields still synthesized are
+ * the ones that are genuinely ETBZ's own statements — the version marker and the
+ * two POLICY fields.
+ */
 export type BuildRunEvidenceInput = Omit<
   NarrativeRunEvidence,
-  'evidenceVersion' | 'billableCostCapEur' | 'allowPaid' | 'billableCostEur' | 'canonicalJson' | 'structuralHash'
+  'evidenceVersion' | 'approvedCostCapEur' | 'allowPaid' | 'canonicalJson' | 'structuralHash'
 >;
 
 /** Assembles the record and anchors it with its own canonical text. */
@@ -214,9 +345,10 @@ export function buildRunEvidence(input: BuildRunEvidenceInput): NarrativeRunEvid
   const core = {
     evidenceVersion: RUN_EVIDENCE_VERSION,
     ...input,
-    billableCostCapEur: 0 as const,
+    // POLICY only. The observation arrives from the caller and is never
+    // manufactured here — see the type above.
+    approvedCostCapEur: 0 as const,
     allowPaid: false as const,
-    billableCostEur: 0 as const,
   };
   const canonical = canonicalJson(core);
   return {

@@ -276,7 +276,7 @@ describe('ETBZ-25B negative: buildLlmRoutePlan propagates the refusal', () => {
     const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
 
     expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v1');
-    expect(plan.billableCostCapEur).toBe(0);
+    expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
     expect(plan.routes.length).toBeGreaterThan(0);
   });
@@ -344,7 +344,7 @@ describe('ETBZ-25B negative: no environment variable switches paid on', () => {
     const plan = buildLlmRoutePlan(environment);
 
     expect(plan.allowPaid).toBe(false);
-    expect(plan.billableCostCapEur).toBe(0);
+    expect(plan.approvedCostCapEur).toBe(0);
     expect(JSON.stringify(plan)).toBe(JSON.stringify(buildLlmRoutePlan(FIXTURE_LLM_ENV)));
   });
 

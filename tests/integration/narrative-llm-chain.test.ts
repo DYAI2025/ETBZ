@@ -306,7 +306,7 @@ describe('ETBZ-25B E0: the premise every assertion below is read against', () =>
   });
 
   it('runs under a zero cost cap with no paid path, so no run below can be billable', () => {
-    expect(PLAN.billableCostCapEur).toBe(0);
+    expect(PLAN.approvedCostCapEur).toBe(0);
     expect(PLAN.allowPaid).toBe(false);
   });
 });
@@ -378,7 +378,8 @@ describe('ETBZ-25B E1: the chain turns a chart into a Golden Reading', () => {
 
     expect(run.result.acceptedRouteId).toBe('tokenrouter');
     expect(run.result.attempts.map((attempt) => attempt.outcome)).toEqual(['accepted']);
-    expect(run.result.attempts.map((attempt) => attempt.billableCostEur)).toEqual([0]);
+    // Null, not zero: the fixture provider reports token counts and no cost.
+    expect(run.result.attempts.map((attempt) => attempt.reportedCost)).toEqual([null]);
   });
 });
 

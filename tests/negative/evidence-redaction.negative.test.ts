@@ -7,9 +7,12 @@ import { buildGoldenReading } from '../../src/application/interpretation/golden-
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
 import {
   EvidenceLeakError,
+  ObservedCostExceedsCapError,
   RUN_EVIDENCE_VERSION,
   assertEvidenceSanitized,
+  assertObservedCostWithinCap,
   buildRunEvidence,
+  observedBillableCostEurFrom,
 } from '../../src/application/interpretation/narrative-evidence.js';
 import type {
   BuildRunEvidenceInput,
@@ -49,7 +52,7 @@ import { knownTimeModel } from '../support/narrativeFixture.js';
  *
  *  1. WHOLE-RECORD COVERAGE. `assertEvidenceSanitized` serialises and searches,
  *     so the tests plant the credential in fields nobody would think to
- *     sanitise — `billableCostBasis`, `candidateSha`, a route verdict's
+ *     sanitise — `observedCostBasis`, `candidateSha`, a route verdict's
  *     `statement`, and a nested attempt's `responseId`. A field-by-field guard
  *     would pass the first two and miss the rest; this one must catch all four.
  *
@@ -165,8 +168,9 @@ const BASE_INPUT: BuildRunEvidenceInput = {
   semanticQaFindings: QA.findings,
   goldenReadingStatus: READING === null ? 'BLOCKED' : 'CANDIDATE_READY_FOR_HUMAN_REVIEW',
   goldenReadingHash: READING?.structuralHash ?? null,
-  billableCostBasis:
-    'Zero by route eligibility, not by invoice: the accepted route is a provider-published zero-price model (explicit free marker in the model id) and none of the approved routes returns a per-call cost field.',
+  observedBillableCostEur: null,
+  observedCostBasis:
+    'Not observed: none of the approved routes returned a per-call cost field for this run, so no monetary cost was measured. The 0.00 EUR figure recorded beside it is the APPROVED CAP, which is policy, not a reading.',
 };
 
 /** The baseline, and every mutation of it, through the real builder. */
@@ -301,15 +305,29 @@ describe('ETBZ-25B evidence: the baseline every case below mutates is a real, ga
 // ---------------------------------------------------------------------------
 
 describe('ETBZ-25B evidence: buildRunEvidence pins the cost contract and anchors the record in its own text', () => {
-  it('pins the zero-cost contract regardless of what the caller supplies', () => {
+  it('pins the POLICY and leaves the OBSERVATION exactly as it was supplied', () => {
     const evidence = evidenceWith({});
 
     expect(evidence.evidenceVersion).toBe(RUN_EVIDENCE_VERSION);
-    expect(evidence.billableCostEur).toBe(0);
-    expect(evidence.billableCostCapEur).toBe(0);
+    // Policy: ETBZ's own decision, synthesized by the builder, always true.
+    expect(evidence.approvedCostCapEur).toBe(0);
     expect(evidence.allowPaid).toBe(false);
-    // The number never travels alone: the basis says HOW the zero is known.
-    expect(evidence.billableCostBasis.length).toBeGreaterThan(0);
+    // Observation: NOT synthesized. The fixture run observed no cost, so the
+    // record says so. `toBeNull` rather than `toBe(0)` is the whole repair —
+    // if the builder ever manufactures a zero here again, this goes red.
+    expect(evidence.observedBillableCostEur).toBeNull();
+    // The value never travels alone: the basis says WHY it holds what it holds.
+    expect(evidence.observedCostBasis.length).toBeGreaterThan(0);
+  });
+
+  it('cannot be made to report an observed zero for a run that observed nothing', () => {
+    // The defect this whole split exists to prevent, asserted directly. A caller
+    // that never measured a cost has no way to publish one: the value it passes
+    // is the value that appears, so an absent measurement stays absent.
+    expect(evidenceWith({ observedBillableCostEur: null }).observedBillableCostEur).toBeNull();
+    // And a caller that DID measure one is recorded faithfully rather than being
+    // flattened into the policy number.
+    expect(evidenceWith({ observedBillableCostEur: 0 }).observedBillableCostEur).toBe(0);
   });
 
   it('overwrites a caller-supplied paid value rather than carrying it', () => {
@@ -320,16 +338,78 @@ describe('ETBZ-25B evidence: buildRunEvidence pins the cost contract and anchors
     // deserialised run record.
     const tampered: Record<string, unknown> = {
       ...BASE_INPUT,
-      billableCostEur: 42,
-      billableCostCapEur: 99,
+      approvedCostCapEur: 99,
       allowPaid: true,
     };
 
     const evidence = buildRunEvidence(tampered as unknown as BuildRunEvidenceInput);
 
-    expect(evidence.billableCostEur).toBe(0);
-    expect(evidence.billableCostCapEur).toBe(0);
+    expect(evidence.approvedCostCapEur).toBe(0);
     expect(evidence.allowPaid).toBe(false);
+  });
+
+  it('refuses a record in which a provider reported a non-zero cost', () => {
+    // The observation is caller-supplied, so the builder can no longer clamp a
+    // paid value to zero — and it must not. Clamping would DELETE the evidence
+    // that a run cost money. The fail-closed duty moved to a guard that refuses
+    // the record instead, and it reads the raw reports rather than the reduced
+    // EUR figure, so a cost in a currency ETBZ cannot convert cannot slip past
+    // as a null.
+    const charged = {
+      ...BASE_INPUT,
+      attempts: BASE_INPUT.attempts.map((attempt) => ({
+        ...attempt,
+        reportedCost: { amount: 0.0042, currency: 'USD', source: 'usage.cost' },
+      })),
+      observedBillableCostEur: null,
+    };
+
+    expect(() => {
+      assertObservedCostWithinCap(buildRunEvidence(charged));
+    }).toThrow(ObservedCostExceedsCapError);
+
+    // A reported zero is a real observation and is NOT refused.
+    const free = {
+      ...BASE_INPUT,
+      attempts: BASE_INPUT.attempts.map((attempt) => ({
+        ...attempt,
+        reportedCost: { amount: 0, currency: null, source: 'usage.cost' },
+      })),
+      observedBillableCostEur: 0,
+    };
+    expect(() => {
+      assertObservedCostWithinCap(buildRunEvidence(free));
+    }).not.toThrow();
+  });
+
+  it('reduces provider reports to EUR only when it can do so without inventing a rate', () => {
+    const attempt = BASE_INPUT.attempts[0];
+    if (attempt === undefined) {
+      throw new Error('fixture defect: the fixture run has no attempts');
+    }
+    const withCost = (reportedCost: {
+      amount: number;
+      currency: string | null;
+      source: string;
+    } | null): typeof attempt => ({ ...attempt, reportedCost });
+
+    // Nothing reported at all.
+    expect(observedBillableCostEurFrom([withCost(null)])).toBeNull();
+    // A reported zero IS an observation: zero is the same amount in every
+    // currency, so an unlabelled zero is still zero EUR.
+    expect(
+      observedBillableCostEurFrom([withCost({ amount: 0, currency: null, source: 'usage.cost' })]),
+    ).toBe(0);
+    // Labelled EUR, so it can be stated as EUR.
+    expect(
+      observedBillableCostEurFrom([withCost({ amount: 1.5, currency: 'EUR', source: 'usage.cost' })]),
+    ).toBe(1.5);
+    // Non-zero and not EUR: unconvertible without a rate ETBZ would invent, so
+    // the EUR field stays null — and the cap guard above is what stops that null
+    // from being mistaken for "nothing happened".
+    expect(
+      observedBillableCostEurFrom([withCost({ amount: 1.5, currency: 'USD', source: 'usage.cost' })]),
+    ).toBeNull();
   });
 
   it('publishes a canonicalJson that is the canonical text of the record minus its own two self-referential fields', () => {
@@ -388,10 +468,10 @@ describe('ETBZ-25B evidence: a configured credential value is refused wherever i
     }).not.toThrow();
   });
 
-  it('refuses a credential placed in billableCostBasis', () => {
+  it('refuses a credential placed in observedCostBasis', () => {
     const secret = firstConfiguredSecret();
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} Key used: ${secret}`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} Key used: ${secret}`,
     });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
@@ -450,7 +530,7 @@ describe('ETBZ-25B evidence: a configured credential value is refused wherever i
     expect(first).toBeDefined();
     expect(second).toBeDefined();
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} ${String(first)} ${String(second)}`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} ${String(first)} ${String(second)}`,
     });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
@@ -465,7 +545,7 @@ describe('ETBZ-25B evidence: a configured credential value is refused wherever i
     // them, and no refusal. A guard that matched on something other than the
     // value — a field name, a length, a prefix — would fail here.
     const evidence = evidenceWith({
-      billableCostBasis: 'Zero by route eligibility. No credential value is recorded anywhere.',
+      observedCostBasis: 'Zero by route eligibility. No credential value is recorded anywhere.',
     });
 
     expect(() => {
@@ -484,7 +564,7 @@ describe('ETBZ-25B evidence: a credential-shaped token is refused even when the 
     // token, so the refusal cannot have come from the value comparison.
     expect(CONFIGURED_SECRETS).not.toContain(token);
 
-    const evidence = evidenceWith({ billableCostBasis: `${BASE_INPUT.billableCostBasis} ${token}` });
+    const evidence = evidenceWith({ observedCostBasis: `${BASE_INPUT.observedCostBasis} ${token}` });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
 
@@ -494,7 +574,7 @@ describe('ETBZ-25B evidence: a credential-shaped token is refused even when the 
   it('refuses a shaped token even when the declared list is empty', () => {
     const [, token] = SHAPED_CREDENTIALS[0] ?? [];
     expect(token).toBeDefined();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${String(token)}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${String(token)}` });
 
     const refusal = refusalFor(evidence, []);
 
@@ -516,7 +596,7 @@ describe('ETBZ-25B evidence: a credential-shaped token is refused even when the 
     // `sk-` alone is not a credential, and a guard that treated it as one would
     // be unusable in prose.
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} ${fragments('sk', '-short')}`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} ${fragments('sk', '-short')}`,
     });
 
     expect(() => {
@@ -529,7 +609,7 @@ describe('ETBZ-25B evidence: a credential-shaped token is refused even when the 
     // is refused by a naive substring check. The pattern is anchored on a word
     // boundary, so it is accepted here — which is what keeps the guard usable.
     const evidence = evidenceWith({
-      billableCostBasis: fragments('Reviewed at the desk', '-side-handover-0123456789abcdef'),
+      observedCostBasis: fragments('Reviewed at the desk', '-side-handover-0123456789abcdef'),
     });
 
     expect(() => {
@@ -549,9 +629,9 @@ describe('ETBZ-25B evidence: a personal datum of the subject is refused', () => 
     }).not.toThrow();
   });
 
-  it('refuses the subject display name placed in billableCostBasis', () => {
+  it('refuses the subject display name placed in observedCostBasis', () => {
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} Reading for ${MODEL.displayName}.`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} Reading for ${MODEL.displayName}.`,
     });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS, SUBJECT_PERSONAL_VALUES);
@@ -579,7 +659,7 @@ describe('ETBZ-25B evidence: a personal datum of the subject is refused', () => 
   it('reports both classes when a credential and a personal datum leak together', () => {
     const secret = firstConfiguredSecret();
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} ${secret} for ${MODEL.displayName}`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} ${secret} for ${MODEL.displayName}`,
     });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS, SUBJECT_PERSONAL_VALUES);
@@ -594,7 +674,7 @@ describe('ETBZ-25B evidence: a personal datum of the subject is refused', () => 
     // subject's name and birth date explicitly, and this test is the reason
     // that call site cannot be quietly shortened.
     const evidence = evidenceWith({
-      billableCostBasis: `${BASE_INPUT.billableCostBasis} Reading for ${MODEL.displayName}.`,
+      observedCostBasis: `${BASE_INPUT.observedCostBasis} Reading for ${MODEL.displayName}.`,
     });
 
     expect(() => {
@@ -635,7 +715,7 @@ describe('ETBZ-25B evidence: a blank entry in a declared list is ignored, not ma
     // guard that ignores its list entirely. One thing changed against the first
     // case in this block: a real value added to the same list.
     const secret = firstConfiguredSecret();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${secret}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${secret}` });
 
     const refusal = refusalFor(evidence, ['', '   ', secret]);
 
@@ -652,7 +732,7 @@ describe('ETBZ-25B evidence: the refusal names the defect without repeating the 
     // A guard that prints the secret it found has moved the leak from the
     // evidence file into the CI log, where it is harder to delete.
     const secret = firstConfiguredSecret();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${secret}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${secret}` });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
 
@@ -665,7 +745,7 @@ describe('ETBZ-25B evidence: the refusal names the defect without repeating the 
   it('keeps a leaked shaped token out of the message and out of every description', () => {
     const [, token] = SHAPED_CREDENTIALS[0] ?? [];
     expect(token).toBeDefined();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${String(token)}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${String(token)}` });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
 
@@ -677,7 +757,7 @@ describe('ETBZ-25B evidence: the refusal names the defect without repeating the 
 
   it('keeps a leaked personal datum out of the message and out of every description', () => {
     const evidence = evidenceWith({
-      billableCostBasis: `Reading for ${MODEL.displayName}, born ${MODEL.birth.date}.`,
+      observedCostBasis: `Reading for ${MODEL.displayName}, born ${MODEL.birth.date}.`,
     });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS, SUBJECT_PERSONAL_VALUES);
@@ -695,7 +775,7 @@ describe('ETBZ-25B evidence: the refusal names the defect without repeating the 
     // useless as one that says too much, so this control requires the refusal
     // to be typed, coded, named and specific about WHAT was found.
     const secret = firstConfiguredSecret();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${secret}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${secret}` });
 
     const refusal = refusalFor(evidence, CONFIGURED_SECRETS);
 
@@ -710,7 +790,7 @@ describe('ETBZ-25B evidence: the refusal names the defect without repeating the 
   it('names the recognised shape so a reader knows what to look for', () => {
     const [, token] = SHAPED_CREDENTIALS[1] ?? [];
     expect(token).toBeDefined();
-    const evidence = evidenceWith({ billableCostBasis: `Key: ${String(token)}` });
+    const evidence = evidenceWith({ observedCostBasis: `Key: ${String(token)}` });
 
     const refusal = refusalFor(evidence, []);
 

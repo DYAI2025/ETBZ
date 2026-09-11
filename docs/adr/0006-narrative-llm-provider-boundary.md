@@ -59,7 +59,7 @@ readback. A `:free`-suffixed passthrough model on TokenRouter was observed to
 require account credit despite its marker. It fails closed at call time
 (`insufficient_user_quota`) and cannot be billed against a zero balance, but the
 eligibility check would have admitted it. This is why every evidence record
-states `billableCostBasis` in words instead of publishing a bare zero.
+states `observedCostBasis` in words instead of publishing a bare zero.
 
 ### 4. A paid path cannot be enabled by configuration
 

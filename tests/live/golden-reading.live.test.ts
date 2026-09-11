@@ -33,7 +33,12 @@ import { NarrativeProviderError } from '../../src/application/interpretation/err
 import { generateNarrativeFromPlan } from '../../src/adapters/llm/llm-narrative-provider.js';
 import { buildGoldenReading, renderGoldenReadingText } from '../../src/application/interpretation/golden-reading.js';
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
-import { buildRunEvidence, assertEvidenceSanitized } from '../../src/application/interpretation/narrative-evidence.js';
+import {
+  assertEvidenceSanitized,
+  assertObservedCostWithinCap,
+  buildRunEvidence,
+  observedBillableCostEurFrom,
+} from '../../src/application/interpretation/narrative-evidence.js';
 import type { NarrativeRunEvidence } from '../../src/application/interpretation/narrative-evidence.js';
 import { buildReportModel } from '../../src/application/interpretation/report-model.js';
 import { NARRATIVE_QA_VERSION, runSemanticNarrativeQa } from '../../src/application/interpretation/semantic-qa.js';
@@ -147,8 +152,12 @@ async function runOnce(
     goldenReadingStatus:
       reading === null ? 'BLOCKED' : 'CANDIDATE_READY_FOR_HUMAN_REVIEW',
     goldenReadingHash: reading?.structuralHash ?? null,
-    billableCostBasis:
-      'Zero by route eligibility, not by invoice: the accepted route is a provider-published zero-price model (explicit free marker in the model id) and none of the approved routes returns a per-call cost field. No billing-API readback exists for this route.',
+    // DERIVED FROM WHAT THE PROVIDER ACTUALLY REPORTED, not from the cap. On
+    // every approved route except OpenRouter this is null, because the route
+    // returns no cost field at all - and null is the truthful record of that.
+    observedBillableCostEur: observedBillableCostEurFrom(result.attempts),
+    observedCostBasis:
+      'The approved cap of 0.00 EUR is POLICY and is recorded as approvedCostCapEur. What appears as observedBillableCostEur is an OBSERVATION and is null unless a route actually reported a per-call cost: the free marker in a model id is an eligibility guard ETBZ applies before calling, never a billing readback, and no approved route exposes a billing API to read one from.',
   });
 
   // Refuse to persist anything that carries a credential or a personal datum.
@@ -157,6 +166,10 @@ async function runOnce(
     model.displayName,
     model.birth.date,
   ]);
+  // Fail closed on the OBSERVATION as well as on the policy. If a route did
+  // report a charge, this run breached the 0.00 EUR cap and the record is
+  // refused rather than filed.
+  assertObservedCostWithinCap(evidence);
 
   mkdirSync(OUT_DIR, { recursive: true });
   writeFileSync(resolve(OUT_DIR, `etbz-25b-${label}-evidence.json`), evidence.canonicalJson, 'utf8');
@@ -198,7 +211,10 @@ describe('ETBZ-25B live provider run', () => {
     // Every attempt of a run under this contract is free. Asserted rather than
     // assumed, so a future route that reported a cost would fail here.
     for (const attempt of outcome.evidence.attempts) {
-      expect(attempt.billableCostEur).toBe(0);
+      // Either the provider reported nothing (null) or it reported zero. A
+      // non-zero report is a cap breach and would already have been refused by
+      // assertObservedCostWithinCap before this record was written.
+      expect(attempt.reportedCost?.amount ?? 0).toBe(0);
     }
   });
 

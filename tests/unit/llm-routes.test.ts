@@ -506,14 +506,14 @@ describe('ETBZ-25B: base URL normalisation cannot produce a double slash', () =>
 describe('ETBZ-25B: the plan carries the 0.00 EUR cap as a constant, not a setting', () => {
   it('declares a zero cap, a refused paid path and its plan version', () => {
     const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
-    expect(plan.billableCostCapEur).toBe(0);
+    expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
     expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v1');
   });
 
   it('keeps the cap when no route is eligible at all', () => {
     const plan = buildLlmRoutePlan({});
-    expect(plan.billableCostCapEur).toBe(0);
+    expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
   });
 
@@ -524,7 +524,7 @@ describe('ETBZ-25B: the plan carries the 0.00 EUR cap as a constant, not a setti
       environmentWith({ [GEMINI.modelVariable]: 'vendor-model-b:free' }),
     );
     expect(plan.routes).toHaveLength(4);
-    expect(plan.billableCostCapEur).toBe(0);
+    expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
   });
 });

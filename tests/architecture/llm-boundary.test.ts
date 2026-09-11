@@ -918,6 +918,13 @@ describe('ETBZ-25B: the run evidence record declares no credential-shaped field'
         'attempts',
         'routeVerdicts',
         'structuralHash',
+        // The cost POLICY and the cost OBSERVATION, pinned as two distinct
+        // fields. They were one, and a reader could not tell an approved cap
+        // from a measured charge. Collapsing them again fails here.
+        'approvedCostCapEur',
+        'allowPaid',
+        'observedBillableCostEur',
+        'observedCostBasis',
       ]),
     );
   });
@@ -1033,7 +1040,9 @@ describe('ETBZ-25B: the run evidence record declares no credential-shaped field'
     'briefStructuralHash',
     'acceptedRouteId',
     'failoverAuthorized',
-    'billableCostBasis',
+    'observedCostBasis',
+    'observedBillableCostEur',
+    'approvedCostCapEur',
     'goldenReadingHash',
     'semanticQaFindings',
     'canonicalJson',

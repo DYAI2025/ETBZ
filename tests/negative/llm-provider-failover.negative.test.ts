@@ -196,7 +196,7 @@ describe('ETBZ-25B F0: the premise these tests rest on', () => {
   });
 
   it('pins the cost cap at zero with no paid path in the plan the runs below use', () => {
-    expect(PLAN.billableCostCapEur).toBe(0);
+    expect(PLAN.approvedCostCapEur).toBe(0);
     expect(PLAN.allowPaid).toBe(false);
   });
 
@@ -314,7 +314,9 @@ describe('ETBZ-25B AC5 F1: a transient failure advances to the next ELIGIBLE rou
         responseId: null,
         responseHash: null,
         finishReason: null,
-        billableCostEur: 0,
+        // The 429 attempt never received a body, so no provider reported
+        // anything about cost. Null, never zero.
+        reportedCost: null,
       },
       {
         order: 3,
@@ -330,7 +332,10 @@ describe('ETBZ-25B AC5 F1: a transient failure advances to the next ELIGIBLE rou
         responseId: 'cmpl-fixture',
         responseHash: VALID_ANSWER_HASH,
         finishReason: 'stop',
-        billableCostEur: 0,
+        // The fixture answers with an OpenAI-shaped usage block that carries
+        // token counts and no cost field — like three of the four real routes.
+        // "Not reported" is the honest record of that.
+        reportedCost: null,
       },
     ]);
   });
@@ -714,10 +719,13 @@ describe('ETBZ-25B AC5 F6: every attempt of every run states a zero billable cos
     // The arity is asserted first so `every` below cannot pass vacuously over
     // an empty array.
     expect(result.attempts).toHaveLength(1);
-    expect(result.attempts.map((attempt) => attempt.billableCostEur)).toEqual([0]);
+    // NOT `toEqual([0])`. The provider reported no cost, and a zero here would
+    // be a measurement nobody took — the precise confusion this field was split
+    // apart to end. The 0.00 EUR cap is POLICY and lives on the route plan.
+    expect(result.attempts.map((attempt) => attempt.reportedCost)).toEqual([null]);
   });
 
-  it('records zero on the FAILED attempts of a failover run, not only on the accepted one', async () => {
+  it('records no observed cost on the FAILED attempts of a failover run either', async () => {
     const transport = fakeTransport([statusReply(429), statusReply(503), validReply()]);
 
     const result = await generateNarrativeFromPlan(CHAIN.brief, PLAN, transport);
@@ -728,7 +736,9 @@ describe('ETBZ-25B AC5 F6: every attempt of every run states a zero billable cos
       'transient_failure',
       'accepted',
     ]);
-    expect(result.attempts.map((attempt) => attempt.billableCostEur)).toEqual([0, 0, 0]);
-    expect(result.attempts.every((attempt) => attempt.billableCostEur === 0)).toBe(true);
+    expect(result.attempts.map((attempt) => attempt.reportedCost)).toEqual([null, null, null]);
+    // Stated as a separate property so a future fixture that DOES report a cost
+    // fails loudly here rather than quietly widening what "free" means.
+    expect(result.attempts.every((attempt) => attempt.reportedCost === null)).toBe(true);
   });
 });

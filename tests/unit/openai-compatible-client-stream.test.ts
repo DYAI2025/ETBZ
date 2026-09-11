@@ -9,9 +9,15 @@
  * path and the verified path were different code — so this file covers it.
  *
  * The properties that matter are the ones a naive accumulator gets wrong:
- * chunk boundaries that fall mid-line, keep-alive frames that are not JSON, a
- * usage block that arrives in its own final frame, and a stream that carries no
- * content at all.
+ * chunk boundaries that fall mid-line, a usage block that arrives in its own
+ * final frame, and a stream that carries no content at all.
+ *
+ * And the two-sided rule about what may be skipped. A frame that makes no claim
+ * to carry completion data — an SSE comment, a keep-alive, an empty payload,
+ * `[DONE]` — is ignored. A `data:` frame that CLAIMS a chunk and does not carry
+ * one is a TERMINAL contract failure that must not authorise failover. The
+ * second half is covered here because it used to be the opposite, and because
+ * the one line that can silently undo it lives two functions away.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -168,13 +174,17 @@ describe('ETBZ-25B streaming: accumulation', () => {
     expect(completion.content).toBe('{"sections":[1,2,3]}');
   });
 
-  it('ignores keep-alive and comment frames instead of failing on them', async () => {
-    // Providers interleave these. Treating one as a contract violation would
-    // refuse a perfectly good reading.
+  it('ignores comment lines and empty data payloads, which claim no chunk', async () => {
+    // Providers interleave these while a model thinks — OpenRouter sends
+    // ': OPENROUTER PROCESSING' every few seconds. None of them says it carries
+    // completion data, so none of them can be a contract violation; refusing one
+    // would refuse a perfectly good reading. A 'data:' frame that DOES claim a
+    // chunk is a different matter entirely — see the refusals below.
     const noise = [
       ': keep-alive\n\n',
+      ': OPENROUTER PROCESSING\n\n',
       'data: \n\n',
-      'data: not-json-at-all\n\n',
+      'event: ping\n\n',
       asEventStream(completionBody('{"ok":1}')),
     ].join('');
 
@@ -207,6 +217,93 @@ describe('ETBZ-25B streaming: accumulation', () => {
 });
 
 describe('ETBZ-25B streaming: refusals', () => {
+  it('refuses a malformed data frame MID-STREAM, and calls it TERMINAL', async () => {
+    // THE REGRESSION TEST FOR THE WHOLE REPAIR. A frame that says 'data:' and
+    // then does not carry a JSON chunk is corrupted content, not a bad minute on
+    // the network. Classing it transient would let corrupted content buy
+    // permission to call the next provider, which is provider shopping.
+    //
+    // The bad frame sits in the MIDDLE on purpose. A stream ending on it would
+    // be read from the residual buffer instead, where an unterminated line is
+    // correctly transient — and this test would then pass while the in-stream
+    // path stayed broken.
+    const stream = [
+      'data: {"id":"x","choices":[{"delta":{"content":"{"}}]}\n\n',
+      'data: {not json at all}\n\n',
+      'data: {"choices":[{"delta":{"content":"}"},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+
+    await expect(
+      requestChatCompletion(ROUTE, STREAMING_REQUEST, transportServing(stream)),
+    ).rejects.toMatchObject({
+      code: 'LLM_CONTRACT_ERROR',
+      failureClass: 'terminal',
+    });
+  });
+
+  it('refuses a data frame whose payload parses but is not an object', async () => {
+    // 'null', a bare number and a bare string all survive JSON.parse. Read as a
+    // chunk, each one yields an object with every field undefined and is skipped
+    // in silence — a corrupted frame that looks exactly like a keep-alive.
+    for (const payload of ['null', '42', '"a string"']) {
+      await expect(
+        requestChatCompletion(
+          ROUTE,
+          STREAMING_REQUEST,
+          transportServing(`data: ${payload}\n\ndata: [DONE]\n\n`),
+        ),
+        `payload ${payload} must be refused`,
+      ).rejects.toMatchObject({
+        code: 'LLM_CONTRACT_ERROR',
+        failureClass: 'terminal',
+      });
+    }
+  });
+
+  it('calls a stream that CLOSED mid-frame transient, not a contract failure', async () => {
+    // The other side of the same rule, and the reason the two positions are
+    // classified differently. Here the provider did not send a bad frame: the
+    // connection ended before the frame was finished, leaving an unterminated
+    // line in the buffer. That line is incomplete by construction, so it says
+    // nothing about what the provider meant — it is an availability failure and
+    // failover IS authorised.
+    const cut =
+      'data: {"id":"x","choices":[{"delta":{"content":"hello"}}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"wor';
+
+    const error = await requestChatCompletion(
+      ROUTE,
+      STREAMING_REQUEST,
+      transportServing(cut),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect(error).toMatchObject({
+      code: 'LLM_NETWORK_ERROR',
+      failureClass: 'transient',
+    });
+    // And nothing partial escapes: the content accumulated before the cut is
+    // discarded with the throw rather than returned as a complete reading.
+    expect((error as { message: string }).message).not.toContain('hello');
+  });
+
+  it('never republishes the offending payload in the refusal message', async () => {
+    // A refusal does not republish what it refuses. The payload is unvalidated
+    // provider output and the message is logged and travels beside evidence;
+    // JSON.parse's own message cannot be forwarded either, because it quotes the
+    // source text verbatim.
+    const marker = 'SECRET-LOOKING-PAYLOAD-CONTENT';
+    const error = await requestChatCompletion(
+      ROUTE,
+      STREAMING_REQUEST,
+      transportServing(`data: {${marker}}\n\ndata: [DONE]\n\n`),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect((error as { message: string }).message).not.toContain(marker);
+  });
+
   it('refuses a stream that carried no content, and calls it TERMINAL', async () => {
     // A route that answered and said nothing has not had an availability
     // problem, so this must never authorise trying another provider.

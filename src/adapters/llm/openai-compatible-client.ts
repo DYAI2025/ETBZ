@@ -106,6 +106,8 @@ export interface LlmCompletion {
   readonly content: string;
   readonly finishReason: string | null;
   readonly usage: LlmUsage;
+  /** What the provider said this call cost. `null` when it said nothing. */
+  readonly reportedCost: ReportedCost | null;
 }
 
 export interface LlmChatRequest {
@@ -179,6 +181,52 @@ function readUsage(raw: unknown): LlmUsage {
 }
 
 /**
+ * A per-request monetary cost a provider ACTUALLY reported.
+ *
+ * The distinction this type exists to preserve: `null` means NO PROVIDER SAID
+ * ANYTHING ABOUT COST, which is not the same fact as a provider reporting zero,
+ * and neither is the same fact as ETBZ having approved a zero cap. Collapsing
+ * the three was the defect — a policy number was being published in the field a
+ * reader takes for a measurement.
+ *
+ * `currency` is whatever the provider labelled the amount, verbatim, and `null`
+ * when it labelled none. It is NOT normalised and the amount is NEVER converted:
+ * an exchange rate ETBZ picked for itself would be exactly the kind of invented
+ * number this whole record exists to keep out.
+ */
+export interface ReportedCost {
+  readonly amount: number;
+  readonly currency: string | null;
+  /** The response field the amount was read from. Non-secret, published. */
+  readonly source: string;
+}
+
+/**
+ * Reads a per-request cost out of a provider `usage` block, if it has one.
+ *
+ * MEASURED, not assumed: of the four approved routes, only OpenRouter returns a
+ * cost at all (`usage.cost`, unlabelled), and TokenRouter, OpenCode and the
+ * Gemini OpenAI-compatible endpoint return none. So `null` is the ordinary
+ * answer here and must stay distinguishable from a reported `0` forever.
+ */
+export function readReportedCost(raw: unknown): ReportedCost | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const usage = raw as Record<string, unknown>;
+  const amount = numberOrNull(usage['cost']);
+  if (amount === null) {
+    return null;
+  }
+  const labelled = usage['cost_currency'] ?? usage['currency'];
+  return {
+    amount,
+    currency: typeof labelled === 'string' && labelled.trim().length > 0 ? labelled.trim() : null,
+    source: 'usage.cost',
+  };
+}
+
+/**
  * Classifies a completed HTTP response.
  *
  * Exported so the classification is testable on its own: the failover
@@ -216,6 +264,56 @@ interface StreamChunk {
   readonly usage?: unknown;
 }
 
+/** Where in the stream a line was read from. It decides how a bad line is classed. */
+type LinePosition = 'in_stream' | 'residual';
+
+/**
+ * The refusal for a `data:` line that claims a completion chunk and is not one.
+ *
+ * TWO CLASSIFICATIONS, because the two positions are two different failures.
+ *
+ *  in_stream  the provider delivered a complete line, between newlines, that
+ *             says `data:` and then does not carry a chunk. The route answered;
+ *             it answered with something that is not the contract. That is
+ *             TERMINAL — a provider that sends garbage has not had an
+ *             availability problem, and classing it transient would let
+ *             corrupted content buy permission to call the next provider, which
+ *             is precisely the provider-shopping the failover rules forbid.
+ *
+ *  residual   the stream CLOSED leaving an unterminated line in the buffer. That
+ *             line is incomplete by construction, so its unparseability says
+ *             nothing about what the provider meant to send — the connection
+ *             ended mid-frame. That is an availability failure, TRANSIENT, and
+ *             failover is authorised. Note it also throws away whatever content
+ *             had accumulated before the cut, which is what keeps rule 4 true:
+ *             a half-written reading is never returned as a whole one.
+ *
+ * THE MESSAGE NAMES THE FACT, NEVER THE BYTES. Interpolating the payload would
+ * republish unvalidated provider output into an error that is logged and travels
+ * beside the evidence record. `JSON.parse`'s own message cannot be forwarded
+ * either: it quotes the offending source text verbatim.
+ */
+function malformedChunk(
+  route: LlmRouteConfig,
+  position: LinePosition,
+  payloadLength: number,
+): LlmProviderError {
+  if (position === 'residual') {
+    return new LlmProviderError(
+      'LLM_NETWORK_ERROR',
+      'transient',
+      route.routeId,
+      `route "${route.routeId}" closed mid-frame: the stream ended on an incomplete data line of ${String(payloadLength)} characters`,
+    );
+  }
+  return new LlmProviderError(
+    'LLM_CONTRACT_ERROR',
+    'terminal',
+    route.routeId,
+    `route "${route.routeId}" sent a data line of ${String(payloadLength)} characters that is not a JSON completion chunk`,
+  );
+}
+
 /**
  * Accumulates a Server-Sent Events response into one completion.
  *
@@ -223,11 +321,22 @@ interface StreamChunk {
  * finish reason and usage — so a caller cannot tell the two paths apart, which
  * is what lets the whole test suite exercise the same code the live run uses.
  *
- * A chunk that does not parse is SKIPPED rather than fatal: providers interleave
- * comments and keep-alives into an SSE stream, and treating a keep-alive as a
- * contract violation would refuse perfectly good readings. A stream that yields
- * no content at all is still a contract failure, caught by the same empty-content
- * check the buffered path applies.
+ * WHAT IS IGNORED, AND WHY IT IS A CLOSED LIST. A line is skipped only when it
+ * makes no claim to carry completion data: an SSE comment or keep-alive (`: …`),
+ * a non-`data:` field line (`event:`, `id:`, `retry:`), a `data:` line with an
+ * empty payload, and `data: [DONE]`. These are statements about the STREAM, not
+ * about a chunk, and refusing them would refuse perfectly good readings —
+ * OpenRouter, for one, interleaves `: OPENROUTER PROCESSING` keep-alives while a
+ * model thinks.
+ *
+ * EVERYTHING ELSE FAILS CLOSED. A `data:` line that purports to carry a chunk
+ * and does not parse as a JSON object is a contract violation, not noise, and it
+ * is refused rather than skipped. Skipping it was the older behaviour and it was
+ * wrong in a specific way: a corrupted frame vanished silently, the run
+ * continued on whatever content happened to survive, and the reading that came
+ * out was assembled from an answer nobody had validated. A stream that yields no
+ * content at all is still caught by the same empty-content check the buffered
+ * path applies.
  */
 async function readStreamedCompletion(
   route: LlmRouteConfig,
@@ -252,21 +361,37 @@ async function readStreamedCompletion(
   let responseId: string | null = null;
   let model: string | null = null;
   let usage: LlmUsage = { promptTokens: null, completionTokens: null, totalTokens: null };
+  // Accumulated from the same chunk as the usage block, so the streamed and
+  // buffered paths report the same observation for the same answer.
+  let reportedCost: ReportedCost | null = null;
 
-  const consume = (line: string): void => {
+  const consume = (line: string, position: LinePosition): void => {
+    // Makes no claim to carry a chunk: comment, keep-alive, other field, blank.
     if (!line.startsWith('data:')) {
       return;
     }
     const payload = line.slice('data:'.length).trim();
+    // MUST STAY ABOVE THE REFUSAL BELOW. An empty payload is a keep-alive
+    // spelled as a data line and `[DONE]` is the stream's end marker; both are
+    // about the stream rather than about a chunk. Hoisting the refusal above
+    // this check turns every provider keep-alive into a refused reading.
     if (payload.length === 0 || payload === '[DONE]') {
       return;
     }
-    let chunk: StreamChunk;
+    let parsed: unknown;
     try {
-      chunk = JSON.parse(payload) as StreamChunk;
+      parsed = JSON.parse(payload);
     } catch {
-      return;
+      throw malformedChunk(route, position, payload.length);
     }
+    // `null`, a bare number and a bare string all survive JSON.parse. A line
+    // that said `data:` and then delivered one of those is as much a contract
+    // violation as one that did not parse, and it must not read back as a chunk
+    // with every field quietly undefined.
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw malformedChunk(route, position, payload.length);
+    }
+    const chunk = parsed as StreamChunk;
     if (responseId === null && typeof chunk.id === 'string') {
       responseId = chunk.id;
     }
@@ -275,6 +400,7 @@ async function readStreamedCompletion(
     }
     if (chunk.usage !== undefined && chunk.usage !== null) {
       usage = readUsage(chunk.usage);
+      reportedCost = readReportedCost(chunk.usage);
     }
     if (!Array.isArray(chunk.choices)) {
       return;
@@ -311,10 +437,32 @@ async function readStreamedCompletion(
       // incomplete line that must wait for the next chunk rather than be parsed.
       buffered = lines.pop() ?? '';
       for (const line of lines) {
-        consume(line);
+        consume(line, 'in_stream');
       }
     }
+    // Whatever the stream ended on without a closing newline. Read as 'residual'
+    // because an unterminated line is incomplete by construction: see
+    // `malformedChunk` for why that is an availability failure and not a
+    // contract one.
+    consume(buffered, 'residual');
   } catch (error) {
+    // A CLASSIFICATION THIS MODULE ALREADY MADE IS NEVER RE-CLASSIFIED.
+    //
+    // This branch has to come first, and the repair it protects is defeated
+    // without it. `consume` now refuses a malformed chunk from inside this try.
+    // `LlmProviderError` sets `name` to its own value, so the `AbortError` test
+    // below is false for it and it would fall through to the generic re-wrap —
+    // which would rewrite a TERMINAL `LLM_CONTRACT_ERROR` as a TRANSIENT
+    // `LLM_NETWORK_ERROR`, and hand the run permission to call the next provider
+    // on the strength of corrupted content. Silently, too: the contract text
+    // would survive only as a fragment inside a network-failure message.
+    //
+    // The rule is broader than that one case. Everything below classifies a
+    // TRANSPORT failure; an error that arrives already classified is passed
+    // through untouched.
+    if (error instanceof LlmProviderError) {
+      throw error;
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new LlmProviderError(
         'LLM_TIMEOUT',
@@ -334,8 +482,21 @@ async function readStreamedCompletion(
       route.routeId,
       `route "${route.routeId}" stream failed: ${reason}`,
     );
+  } finally {
+    // Release the body on EVERY exit, including the refusals above.
+    //
+    // Before the malformed-chunk refusal existed, the only throws out of this
+    // region came from a socket that was already dead. Now a refusal is
+    // reachable on a perfectly healthy connection: one bad frame, and the body
+    // would be left locked and undrained with the socket open — while
+    // `requestChatCompletion`'s `finally` clears the abort timer at that same
+    // moment, so the deadline that would otherwise have torn it down never
+    // fires. Under failover that leaks one live socket per refused route.
+    //
+    // Deliberately non-throwing: a failed cancel must never replace the
+    // classification being propagated out of this function.
+    void reader.cancel().catch(() => undefined);
   }
-  consume(buffered);
 
   if (content.trim().length === 0) {
     throw new LlmProviderError(
@@ -354,6 +515,7 @@ async function readStreamedCompletion(
     content,
     finishReason,
     usage,
+    reportedCost,
   };
 }
 
@@ -517,5 +679,6 @@ async function sendAndRead(
     content,
     finishReason: typeof first?.finish_reason === 'string' ? first.finish_reason : null,
     usage: readUsage(completion.usage),
+    reportedCost: readReportedCost(completion.usage),
   };
 }

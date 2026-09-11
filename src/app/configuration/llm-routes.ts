@@ -193,8 +193,8 @@ export interface LlmRouteConfig {
 
 export interface LlmRoutePlan {
   readonly planVersion: 'etbz-25b.llm-route-plan.v1';
-  /** The approved development cap. Not configurable in this slice. */
-  readonly billableCostCapEur: 0;
+  /** POLICY: the approved development cap. Not configurable in this slice. */
+  readonly approvedCostCapEur: 0;
   readonly allowPaid: false;
   /** Every approved route with its verdict — including the refused ones. */
   readonly eligibility: readonly RouteEligibility[];
@@ -363,7 +363,7 @@ export function buildLlmRoutePlan(
 
   return {
     planVersion: 'etbz-25b.llm-route-plan.v1',
-    billableCostCapEur: 0,
+    approvedCostCapEur: 0,
     allowPaid: false,
     eligibility,
     routes,

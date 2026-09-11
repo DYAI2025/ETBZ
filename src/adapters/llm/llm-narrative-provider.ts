@@ -33,11 +33,23 @@
  *     truncated answer (`finish_reason: "length"`) is refused rather than
  *     continued elsewhere.
  *
- * COST. Every eligible route is zero-price by the check in
- * `llm-routes.ts`, so each attempt records `billableCostEur: 0`. That number is
- * not measured from a provider invoice — none of the approved routes returns
- * one — and the evidence record says so in exactly those words rather than
- * presenting a naming convention as a billing readback.
+ * COST: POLICY AND OBSERVATION ARE TWO DIFFERENT RECORDS.
+ *
+ * The POLICY — an approved cap of 0.00 EUR and no authorised paid path — lives
+ * in `llm-routes.ts` and is enforced before a credential leaves the process.
+ * It is a decision ETBZ made, and it is true whatever a provider says.
+ *
+ * The OBSERVATION is what a provider actually reported this call cost, and each
+ * attempt records it as `reportedCost` — `null` when the provider reported
+ * nothing, which is the ordinary case for three of the four approved routes.
+ *
+ * These used to be the same field. Every attempt wrote `billableCostEur: 0`,
+ * sourced from the free-model MARKER in the model id, and a reader could not
+ * tell that zero from a measured one. A marker is a defensive eligibility guard
+ * — it decides whether ETBZ is willing to call a route at all — and it is not an
+ * invoice. Writing an unobserved cost as an observed zero is the single most
+ * comfortable lie this record could tell, so the type no longer permits it:
+ * `reportedCost` is nullable, and nothing in this module can synthesize one.
  */
 
 import { structuralHashOfCanonicalText } from '../../domain/structural-hash.js';
@@ -56,7 +68,7 @@ import {
   LlmProviderError,
   requestChatCompletion,
 } from './openai-compatible-client.js';
-import type { LlmUsage, Transport } from './openai-compatible-client.js';
+import type { LlmUsage, ReportedCost, Transport } from './openai-compatible-client.js';
 
 /** The provider id recorded in the report's provenance, per route. */
 export function providerIdFor(route: LlmRouteConfig): string {
@@ -95,8 +107,11 @@ export interface RouteAttempt {
   /** sha256 of the raw answer text. Binds evidence to an exact answer. */
   readonly responseHash: string | null;
   readonly finishReason: string | null;
-  /** Zero by route eligibility, not by invoice. See the module docblock. */
-  readonly billableCostEur: 0;
+  /**
+   * What the PROVIDER reported this attempt cost. `null` when it reported
+   * nothing — which is not a zero, and must never be written as one.
+   */
+  readonly reportedCost: ReportedCost | null;
 }
 
 export interface LlmNarrativeResult {
@@ -169,7 +184,9 @@ function failedAttempt(
     responseId: null,
     responseHash: null,
     finishReason: null,
-    billableCostEur: 0,
+    // No response existed, so nothing was reported. Writing 0 here would be
+    // inventing a measurement for a call that never completed.
+    reportedCost: null,
   };
 }
 
@@ -279,7 +296,7 @@ export async function generateNarrativeFromPlan(
         responseId: completion.responseId,
         responseHash,
         finishReason: completion.finishReason,
-        billableCostEur: 0,
+        reportedCost: completion.reportedCost,
       });
       throw new NarrativeProviderError(
         'PROVIDER_OUTPUT_SCHEMA_INVALID',
@@ -310,7 +327,7 @@ export async function generateNarrativeFromPlan(
         responseId: completion.responseId,
         responseHash,
         finishReason: completion.finishReason,
-        billableCostEur: 0,
+        reportedCost: completion.reportedCost,
       });
       if (error instanceof NarrativeProviderError) {
         // Re-raised carrying the attempt ledger. The parser that threw the
@@ -333,7 +350,7 @@ export async function generateNarrativeFromPlan(
       responseId: completion.responseId,
       responseHash,
       finishReason: completion.finishReason,
-      billableCostEur: 0,
+      reportedCost: completion.reportedCost,
     });
 
     return {

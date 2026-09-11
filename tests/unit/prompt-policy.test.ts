@@ -23,6 +23,7 @@ import {
   ROLE_TERMS,
   SYNTHESIS_CONNECTIVES,
 } from '../../src/application/interpretation/semantic-qa-lexicon.js';
+import { NARRATIVE_QA_POLICY } from '../../src/application/interpretation/semantic-qa.js';
 import { ALTERNATE_TEN_GOD_ROW } from '../support/natalFixture.js';
 import {
   KNOWN_BIRTH,
@@ -718,6 +719,46 @@ describe('ETBZ-25B P7: the obligations are stated as rules, never sprung as refu
     // The brief declares the same two obligations as non-optional.
     expect(KNOWN_CHAIN.brief.constraints.citationRequired).toBe(true);
     expect(KNOWN_CHAIN.brief.constraints.provisionalCitationRequiresNote).toBe(true);
+  });
+
+  it('states an R7 anchoring floor EQUAL to the floor semantic QA blocks on', () => {
+    // THE DRIFT THIS EXISTS TO CATCH, because it already happened once: R7 asked
+    // for ONE cited chart term per paragraph while `NARRATIVE_QA_POLICY`
+    // blocked anything under TWO. A provider that obeyed the prompt exactly was
+    // refused by the gate — the prompt was a trap, which the module docblock
+    // says a prompt must never be. Both numbers were correct in isolation, so
+    // nothing failed; a live run was the only thing that could surface it.
+    //
+    // The expectation is DERIVED from the policy, never typed alongside it.
+    // Raising `minChartTermsPerSection` without rewording R7 fails here, and
+    // there is no edit to this test that reconciles the two while they differ.
+    const GERMAN_FLOOR: Readonly<Record<number, string>> = {
+      1: 'EINEN',
+      2: 'ZWEI',
+      3: 'DREI',
+      4: 'VIER',
+    };
+    const floor = NARRATIVE_QA_POLICY.minChartTermsPerSection;
+    const word = GERMAN_FLOOR[floor];
+    expect(
+      word,
+      `the prompt cannot state a floor of ${String(floor)} that this test cannot spell`,
+    ).toBeDefined();
+
+    const r7 = KNOWN_PROMPT.user
+      .split('\n')
+      .find((line) => line.includes('R7 VERANKERUNG:'));
+    expect(r7).toBeDefined();
+    expect(r7).toContain(`mindestens ${String(word)}`);
+  });
+
+  it('asks the self-check for the SAME count R7 states', () => {
+    // Section 7 of the prompt repeats the obligations as a short self-check. It
+    // said "zwei" while R7 said "einen" — the same document instructing two
+    // different floors. A model resolving that ambiguity either way was at risk
+    // of a refusal it could not have avoided by reading more carefully.
+    expect(KNOWN_PROMPT.user).toContain('Jeder Abschnitt nennt zwei seiner Begriffe.');
+    expect(NARRATIVE_QA_POLICY.minChartTermsPerSection).toBe(2);
   });
 
   it('states the synthesis rule with connectives the gate actually accepts', () => {

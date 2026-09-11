@@ -1177,7 +1177,18 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     const built = source.indexOf('buildProviderRefusalEvidence({', caught);
     const sanitized = source.indexOf('assertEvidenceSanitized(refusalEvidence', built);
     const capped = source.indexOf('assertObservedCostWithinCap(refusalEvidence)', built);
-    const written = source.indexOf('refusalEvidence.canonicalJson', built);
+    // THE WRITE ITSELF, not the name of the thing it writes.
+    //
+    // This searched for 'refusalEvidence.canonicalJson' and called the result
+    // "written". That string is a property access, and a property access is not
+    // a file: replacing the whole `writeFileSync` with a `console.log` of the
+    // same expression deletes the persistence entirely and left this guard
+    // green — measured on d6a5ee5, 1342/1342 passed with nothing reaching disk.
+    // That is precisely the regression this branch exists to prevent, so the
+    // anchor is now the call, and the call is required to be the one writing
+    // the REFUSAL record rather than the accepted run's write further down.
+    const written = source.indexOf('writeFileSync(', built);
+    const writeStatement = source.slice(written, source.indexOf(');', written) + 2);
     const rethrown = source.indexOf('throw error;', written);
 
     expect(caught).toBeGreaterThan(-1);
@@ -1185,6 +1196,7 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     expect(sanitized).toBeGreaterThan(built);
     expect(capped).toBeGreaterThan(built);
     expect(written).toBeGreaterThan(Math.max(sanitized, capped));
+    expect(writeStatement).toContain('refusalEvidence.canonicalJson');
     expect(rethrown).toBeGreaterThan(written);
   });
 

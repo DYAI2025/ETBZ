@@ -491,6 +491,21 @@ async function readStreamedCompletion(
       throw malformedChunk(route, position, payload.length, response.status, observedSoFar());
     }
     const chunk = parsed as StreamChunk;
+    // READ WHAT THE FRAME REPORTS BEFORE REFUSING ON WHAT IT ADMITS.
+    //
+    // This read sat BELOW the in-band error refusal, and a provider that
+    // reports a mid-stream failure can state the usage — and the COST — of the
+    // work it already did in that very frame. The throw happened first, so the
+    // attempt filed `usage: null` and `reportedCost: null`,
+    // `assertObservedCostWithinCap` found nothing to refuse, and a run the
+    // provider charged for passed a 0.00 EUR cap because the charge arrived in
+    // the same frame as the error. Reading first cannot lose anything: a frame
+    // with no usage block leaves both values exactly as they were.
+    if (chunk.usage !== undefined && chunk.usage !== null) {
+      usage = readUsage(chunk.usage);
+      reportedCost = readReportedCost(chunk.usage);
+      usageObserved = true;
+    }
     // AN IN-BAND ERROR FRAME ENDS THE RUN.
     //
     // A provider that has already sent 200 and started streaming reports a
@@ -521,11 +536,6 @@ async function readStreamedCompletion(
     }
     if (model === null && typeof chunk.model === 'string') {
       model = chunk.model;
-    }
-    if (chunk.usage !== undefined && chunk.usage !== null) {
-      usage = readUsage(chunk.usage);
-      reportedCost = readReportedCost(chunk.usage);
-      usageObserved = true;
     }
     if (!Array.isArray(chunk.choices)) {
       return;

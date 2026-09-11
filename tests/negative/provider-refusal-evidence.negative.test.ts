@@ -16,7 +16,10 @@
  *   R4  nothing that did not run is reported as having run;
  *   R5  finish reason, usage and reported cost survive when observed, and stay
  *       null when not;
- *   R6  credentials, raw provider text and reasoning text cannot reach it.
+ *   R6  credentials, raw provider text and reasoning text cannot reach it;
+ *   R7  EVERY refusal that observed something files it, no record implies a
+ *       provider request that never happened, and a cost reported inside an
+ *       in-band error frame still fails the cap.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -720,5 +723,329 @@ describe('ETBZ-25B refusal R6: credentials, raw provider text and reasoning neve
     expect(() => {
       assertEvidenceSanitized(leaked, [ROUTE.apiKey]);
     }).toThrow(EvidenceLeakError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R7 — the three gaps an adversarial review found in the repair itself.
+//
+// R5 above proves observation preservation on TWO of the refusal paths that can
+// carry one. Measured on candidate d6a5ee5 by deleting `observed` from each
+// throw site in turn and running the whole suite: the other six lost their
+// observation with 1342/1342 still passing. A property nothing measures is a
+// property the next edit removes, so the table below covers all eight and a
+// completeness guard keeps it that way.
+//
+// The two singles that follow are different in kind. One is a record claiming a
+// request parameter for a run that dispatched no request; the other is a cost
+// that arrives in the same stream frame as the error and was read after the
+// throw, which made a charged run invisible to the 0.00 EUR cap.
+// ---------------------------------------------------------------------------
+
+/** Token counts and a reported zero cost, in a provider's own wire spelling. */
+const OBSERVED_USAGE = {
+  prompt_tokens: 11,
+  completion_tokens: 22,
+  total_tokens: 33,
+  cost: 0,
+} as const;
+
+/** What every streamed scenario below reports BEFORE it is refused. */
+const OBSERVED_PREAMBLE =
+  `data: ${JSON.stringify({ id: 'obs', choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n` +
+  `data: ${JSON.stringify({ id: 'obs', choices: [], usage: OBSERVED_USAGE })}\n\n`;
+
+interface ExpectedObservation {
+  readonly finishReason: string | null;
+  readonly usage: { readonly promptTokens: number; readonly completionTokens: number; readonly totalTokens: number };
+  readonly reportedCost: { readonly amount: number; readonly currency: string | null; readonly source: string };
+}
+
+const STREAM_OBSERVATION: ExpectedObservation = {
+  finishReason: 'length',
+  usage: { promptTokens: 11, completionTokens: 22, totalTokens: 33 },
+  reportedCost: { amount: 0, currency: null, source: 'usage.cost' },
+};
+
+/** Streams the given text, then stalls until the route deadline aborts it. */
+function stallingAfter(preamble: string): Transport {
+  return {
+    fetch(_url: string, init: RequestInit): Promise<Response> {
+      const signal = init.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(preamble));
+          signal?.addEventListener('abort', () => {
+            controller.error(abortError());
+          });
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    },
+  };
+}
+
+/**
+ * Streams the given text, DELIVERS it, and only then breaks the connection.
+ *
+ * Pull-based on purpose. Enqueueing and calling `controller.error` in the same
+ * `start` discards the queue: the reader's first `read()` rejects and the
+ * preamble is never consumed, so the scenario proves nothing about whether an
+ * observation SURVIVES a broken stream — it only proves one was never made.
+ * Measured exactly that way first. Serving the frames on one pull and failing
+ * on the next is also the real shape: a provider reports usage, then the socket
+ * dies.
+ */
+function breakingAfter(preamble: string): Transport {
+  return {
+    fetch(): Promise<Response> {
+      let delivered = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!delivered) {
+            delivered = true;
+            controller.enqueue(new TextEncoder().encode(preamble));
+            return;
+          }
+          controller.error(new Error('connection reset by peer'));
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    },
+  };
+}
+
+interface ObservingScenario {
+  readonly code: ProviderFailureDetailCode;
+  readonly route: LlmRouteConfig;
+  readonly request: LlmChatRequest;
+  readonly transport: () => Transport;
+  readonly expected: ExpectedObservation;
+}
+
+const OBSERVING_SCENARIOS: readonly ObservingScenario[] = [
+  {
+    code: 'MALFORMED_SSE_CHUNK',
+    route: ROUTE,
+    request: STREAMED,
+    transport: () => serving(`${OBSERVED_PREAMBLE}data: {not json\n\n`),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'STREAM_CLOSED_MID_FRAME',
+    route: ROUTE,
+    request: STREAMED,
+    transport: () => serving(`${OBSERVED_PREAMBLE}data: {"choi`),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'IN_BAND_PROVIDER_ERROR',
+    route: ROUTE,
+    request: STREAMED,
+    transport: () =>
+      serving(
+        `${OBSERVED_PREAMBLE}data: ${JSON.stringify({ error: { message: 'upstream failed' } })}\n\n`,
+      ),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'STREAM_TIMEOUT',
+    route: FAST_ROUTE,
+    request: STREAMED,
+    transport: () => stallingAfter(OBSERVED_PREAMBLE),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'STREAM_INTERRUPTED',
+    route: ROUTE,
+    request: STREAMED,
+    transport: () => breakingAfter(OBSERVED_PREAMBLE),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'STREAM_NO_MESSAGE_CONTENT',
+    route: ROUTE,
+    request: STREAMED,
+    transport: () => serving(`${OBSERVED_PREAMBLE}data: [DONE]\n\n`),
+    expected: STREAM_OBSERVATION,
+  },
+  {
+    code: 'BUFFERED_NO_CHOICES',
+    route: ROUTE,
+    request: BUFFERED,
+    transport: () => serving(JSON.stringify({ id: 'obs', choices: [], usage: OBSERVED_USAGE })),
+    // No choice exists, so no finish reason can have been reported. The usage
+    // block still arrived, and null is the truthful record of the other.
+    expected: { ...STREAM_OBSERVATION, finishReason: null },
+  },
+  {
+    code: 'BUFFERED_EMPTY_MESSAGE',
+    route: ROUTE,
+    request: BUFFERED,
+    transport: () =>
+      serving(
+        JSON.stringify(
+          completionBody('', {
+            choices: [{ message: { content: '' }, finish_reason: 'length' }],
+            usage: OBSERVED_USAGE,
+          }),
+        ),
+      ),
+    expected: STREAM_OBSERVATION,
+  },
+];
+
+/**
+ * The refusals that CANNOT have observed anything, and why.
+ *
+ * Each happens before a usable body existed: no request completed, no response
+ * arrived, the status was not 200, or the body was unreadable as a whole. They
+ * are listed rather than inferred so the completeness guard below is a
+ * statement about the closed set and not about whatever the table happens to
+ * contain.
+ */
+const NON_OBSERVING_DETAIL_CODES: readonly ProviderFailureDetailCode[] = [
+  'REQUEST_TIMEOUT',
+  'NETWORK_FAILURE',
+  'HTTP_STATUS_NOT_OK',
+  'BUFFERED_BODY_NOT_JSON',
+  'BUFFERED_BODY_NOT_OBJECT',
+  'STREAM_NO_BODY',
+];
+
+describe('ETBZ-25B refusal R7: every refusal that observed something files it', () => {
+  for (const scenario of OBSERVING_SCENARIOS) {
+    it(`${scenario.code} keeps the finish reason, usage and reported cost it saw`, async () => {
+      const error = await transportRefusal(
+        requestChatCompletion(scenario.route, scenario.request, scenario.transport()),
+      );
+
+      expect(error.detailCode).toBe(scenario.code);
+      expect(error.observed).toEqual(scenario.expected);
+    });
+  }
+
+  it('covers every detail code that can carry an observation, and no other', () => {
+    // Without this, a new throw site added with an `observed` block would be
+    // covered by nothing and the table above would still look complete.
+    const covered = OBSERVING_SCENARIOS.map((scenario) => scenario.code);
+
+    expect(new Set(covered).size).toBe(covered.length);
+    expect([...covered, ...NON_OBSERVING_DETAIL_CODES].sort()).toEqual(
+      [...PROVIDER_FAILURE_DETAIL_CODES].sort(),
+    );
+  });
+
+  it('files no observation on a refusal that could not have one (control)', async () => {
+    const error = await transportRefusal(
+      requestChatCompletion(ROUTE, STREAMED, serving('{"error":"overloaded"}', 503)),
+    );
+
+    expect(error.detailCode).toBe('HTTP_STATUS_NOT_OK');
+    expect(error.observed).toBeNull();
+  });
+
+  it('carries the observation all the way into the filed record', async () => {
+    // The table above measures the transport. This measures the rest of the
+    // chain for one of the six that had nothing: adapter attempt, then record.
+    const record = refusalRecord(
+      await providerRefusal(
+        serving(
+          `${OBSERVED_PREAMBLE}data: ${JSON.stringify({ error: { message: 'upstream failed' } })}\n\n`,
+        ),
+      ),
+    );
+
+    expect(record.attempts[0]).toMatchObject({
+      failureDetailCode: 'IN_BAND_PROVIDER_ERROR',
+      finishReason: 'length',
+      usage: { promptTokens: 11, completionTokens: 22, totalTokens: 33 },
+      reportedCost: { amount: 0, currency: null, source: 'usage.cost' },
+    });
+    expect(record.observedBillableCostEur).toBe(0);
+  });
+});
+
+describe('ETBZ-25B refusal R7: no record implies a provider request that never happened', () => {
+  it('files no requested reasoning effort when nothing was ever dispatched', async () => {
+    // The harness passes the effort it is configured with on BOTH paths, and a
+    // run refused for having no eligible route sends no request at all. Filing
+    // the parameter anyway makes the record say a provider was asked to reason
+    // at some level when no provider was asked anything.
+    const emptyPlan = buildLlmRoutePlan({});
+    const error = await providerRefusal(serving(NO_CONTENT_STREAM), emptyPlan);
+    const record = refusalRecord(error, {
+      routeVerdicts: verdictsOf(emptyPlan),
+      requestedReasoningEffort: 'low',
+    });
+
+    expect(error.code).toBe('PROVIDER_NO_ELIGIBLE_ROUTE');
+    expect(record.attempts).toEqual([]);
+    expect(record.requestedReasoningEffort).toBeNull();
+  });
+
+  it('keeps it when a request WAS dispatched and then refused', async () => {
+    // The other half of the rule: nulling on an empty ledger must not null the
+    // ordinary case, or the field would stop being evidence of anything.
+    const record = refusalRecord(await providerRefusal(serving(NO_CONTENT_STREAM)));
+
+    expect(record.attempts.length).toBeGreaterThan(0);
+    expect(record.requestedReasoningEffort).toBe('low');
+  });
+});
+
+describe('ETBZ-25B refusal R7: a cost reported inside an error frame still fails the cap', () => {
+  it('reads the usage and cost the in-band error frame reports about itself', async () => {
+    // The frame that says the call failed can also say what the failed call
+    // cost — `StreamChunk` declares `usage` and `error` side by side. The
+    // usage was read AFTER the refusal threw, so that cost reached no attempt,
+    // `assertObservedCostWithinCap` had nothing to refuse, and a run a provider
+    // charged for passed the 0.00 EUR cap.
+    const record = refusalRecord(
+      await providerRefusal(
+        serving(
+          sse({
+            error: { message: 'upstream failed' },
+            usage: {
+              prompt_tokens: 7,
+              completion_tokens: 9,
+              total_tokens: 16,
+              cost: '0.0042',
+              cost_currency: 'USD',
+            },
+          }),
+        ),
+      ),
+    );
+
+    expect(record.attempts[0]).toMatchObject({
+      failureDetailCode: 'IN_BAND_PROVIDER_ERROR',
+      usage: { promptTokens: 7, completionTokens: 9, totalTokens: 16 },
+      reportedCost: { amount: 0.0042, currency: 'USD', source: 'usage.cost' },
+    });
+    expect(() => {
+      assertObservedCostWithinCap(record);
+    }).toThrow(ObservedCostExceedsCapError);
+  });
+
+  it('still files nothing of the error frame text (control)', async () => {
+    const error = await transportRefusal(
+      requestChatCompletion(
+        ROUTE,
+        STREAMED,
+        serving(
+          sse({
+            error: { message: `${RAW_PROVIDER_TEXT} ${SECRET_SHAPED}` },
+            usage: { total_tokens: 16, cost: 0 },
+          }),
+        ),
+      ),
+    );
+
+    expect(error.detailCode).toBe('IN_BAND_PROVIDER_ERROR');
+    for (const surface of [error.message, JSON.stringify(error.observed)]) {
+      expect(surface).not.toContain(RAW_PROVIDER_TEXT);
+      expect(surface).not.toContain(SECRET_SHAPED);
+    }
   });
 });

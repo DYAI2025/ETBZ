@@ -71,7 +71,16 @@ import type {
 } from './errors.js';
 import type { NarrativeQaFinding } from './semantic-qa.js';
 
-export const RUN_EVIDENCE_VERSION = 'etbz-25b.run-evidence.v1' as const;
+/**
+ * v2 — `requestedReasoningEffort` changed MEANING, not merely shape.
+ *
+ * In v1 it was whatever the caller passed. In v2 it is what was actually
+ * requested OF A PROVIDER, and it is `null` on a run that dispatched nothing.
+ * A v1 record and a v2 record can therefore carry the same field with the same
+ * type and state different facts, which is exactly what a version marker is
+ * for. Internal refactoring does not move this string.
+ */
+export const RUN_EVIDENCE_VERSION = 'etbz-25b.run-evidence.v2' as const;
 
 /**
  * Token usage exactly as a provider reported it.
@@ -516,7 +525,22 @@ export function buildProviderRefusalEvidence(
     semanticQaFindings: [],
     goldenReadingStatus: 'NOT_PRODUCED',
     goldenReadingHash: null,
-    requestedReasoningEffort: input.requestedReasoningEffort,
+    // A REQUEST PARAMETER IS NOT EVIDENCE UNLESS A REQUEST WAS SENT.
+    //
+    // A run refused before its first dispatch — no route survived the
+    // eligibility check, or the cap re-check refused the first one — has an
+    // EMPTY ledger. Filing the effort the caller was configured with then makes
+    // the record state what a provider was asked to do when no provider was
+    // asked anything, which is the one thing this whole record exists not to
+    // do. An attempt exists for every route a request actually left for,
+    // including the ones that timed out or never connected, so an empty ledger
+    // is exactly "nothing was dispatched".
+    //
+    // Enforced HERE and not in the caller, for the same reason the gate
+    // verdicts are: a caller cannot hand this builder a claim the run did not
+    // earn.
+    requestedReasoningEffort:
+      refusal.attempts.length === 0 ? null : input.requestedReasoningEffort,
     providerRefusalCode: refusal.code,
     observedBillableCostEur: observedBillableCostEurFrom(refusal.attempts),
     observedCostBasis: input.observedCostBasis,

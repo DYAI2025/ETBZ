@@ -285,6 +285,8 @@ interface StreamChunk {
   readonly model?: unknown;
   readonly choices?: unknown;
   readonly usage?: unknown;
+  /** Present when the provider reports a failure mid-stream, after HTTP 200. */
+  readonly error?: unknown;
 }
 
 /** Where in the stream a line was read from. It decides how a bad line is classed. */
@@ -417,6 +419,30 @@ async function readStreamedCompletion(
       throw malformedChunk(route, position, payload.length);
     }
     const chunk = parsed as StreamChunk;
+    // AN IN-BAND ERROR FRAME ENDS THE RUN.
+    //
+    // A provider that has already sent 200 and started streaming reports a
+    // mid-answer failure inside the stream — `data: {"error":{...}}` — because
+    // the status line is long gone. That frame carries no `choices`, so the
+    // choices check below skipped it in silence: the partial text streamed
+    // before it was returned as a COMPLETE answer with `finishReason: null`,
+    // and `isIncompleteFinishReason(null)` is false, so the provider's explicit
+    // statement that the call failed was recorded as `outcome: 'accepted'`.
+    // Measured on this client: a stream of one content frame plus one error
+    // frame resolved with content "partial answer".
+    //
+    // Terminal, like every other unclassified provider behaviour: the transient
+    // allowlist is a closed set of HTTP statuses, and an error nobody has
+    // classified must not buy permission to call the next provider. Nothing
+    // partial survives the throw, which is what keeps rule 4 true here too.
+    if (chunk.error !== undefined && chunk.error !== null) {
+      throw new LlmProviderError(
+        'LLM_CONTRACT_ERROR',
+        'terminal',
+        route.routeId,
+        `route "${route.routeId}" reported an error inside the stream after answering HTTP 200`,
+      );
+    }
     if (responseId === null && typeof chunk.id === 'string') {
       responseId = chunk.id;
     }

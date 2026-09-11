@@ -271,6 +271,36 @@ describe('ETBZ-25B streaming: refusals', () => {
     }
   });
 
+  it('refuses an in-band error frame and keeps nothing that streamed before it', async () => {
+    // A provider that has already sent 200 reports a mid-answer failure inside
+    // the stream, because the status line is long gone. The frame carries no
+    // `choices`, so it used to be skipped in silence and the text streamed
+    // before it was returned as a COMPLETE answer with `finishReason: null` —
+    // which `isIncompleteFinishReason` does not consider incomplete, so the run
+    // recorded the provider's own failure report as `outcome: 'accepted'`.
+    // Measured before the fix: this exact stream resolved with "partial answer".
+    const stream =
+      'data: {"id":"a","choices":[{"delta":{"content":"partial answer"}}]}\n\n' +
+      'data: {"error":{"code":429,"message":"rate limited upstream"}}\n\n';
+
+    const error = await requestChatCompletion(
+      ROUTE,
+      STREAMING_REQUEST,
+      transportServing(stream),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect(error).toMatchObject({
+      code: 'LLM_CONTRACT_ERROR',
+      failureClass: 'terminal',
+    });
+    // Rule 4: the partial text is discarded with the throw, never returned and
+    // never handed to another provider.
+    expect((error as { message: string }).message).not.toContain('partial answer');
+    // And the refusal does not republish the provider's error text either.
+    expect((error as { message: string }).message).not.toContain('rate limited upstream');
+  });
+
   it('calls a stream that CLOSED mid-frame transient, not a contract failure', async () => {
     // The other side of the same rule, and the reason the two positions are
     // classified differently. Here the provider did not send a bad frame: the
@@ -303,15 +333,29 @@ describe('ETBZ-25B streaming: refusals', () => {
     // provider output and the message is logged and travels beside evidence;
     // JSON.parse's own message cannot be forwarded either, because it quotes the
     // source text verbatim.
+    //
+    // THE PAYLOAD IS A BARE TOKEN, NOT '{...}', and that is what makes this test
+    // able to fail. V8 quotes the offending source only for some shapes: for
+    // '{MARKER}' it reports "Expected property name or '}' … at position 1" and
+    // names nothing, so a regression that forwarded the parser message would
+    // still have passed. For a bare token it reports
+    // `Unexpected token 'S', "SECRET-LOO"... is not valid JSON` — it quotes the
+    // first ten characters. Measured both ways; the assertion targets that
+    // prefix, so forwarding the parser's message now goes red.
     const marker = 'SECRET-LOOKING-PAYLOAD-CONTENT';
+    const quotedPrefix = marker.slice(0, 10);
     const error = await requestChatCompletion(
       ROUTE,
       STREAMING_REQUEST,
-      transportServing(`data: {${marker}}\n\ndata: [DONE]\n\n`),
+      transportServing(`data: ${marker}\n\ndata: [DONE]\n\n`),
     ).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(LlmProviderError);
-    expect((error as { message: string }).message).not.toContain(marker);
+    const { message } = error as { message: string };
+    expect(message).not.toContain(marker);
+    // The half that a brace-wrapped payload could never have caught.
+    expect(message).not.toContain(quotedPrefix);
+    expect(message).not.toContain('is not valid JSON');
   });
 
   it('refuses a stream that carried no content, and calls it TERMINAL', async () => {

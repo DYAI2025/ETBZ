@@ -74,7 +74,14 @@ async function runOnce(
   model: ReturnType<typeof knownTimeModel>,
 ): Promise<LiveOutcome> {
   const candidateSha = process.env['ETBZ_CANDIDATE_SHA'] ?? 'UNKNOWN_CANDIDATE_SHA';
-  const plan = buildLlmRoutePlan(process.env);
+  // An explicit route deadline, chosen from measurement rather than from the
+  // library default: the approved free route produced a complete reading in
+  // roughly eight minutes, so fifteen leaves real headroom while still being a
+  // deadline. It must stay comfortably BELOW the runner's own timeout in
+  // `vitest.live.config.ts`, so that a slow provider surfaces as an
+  // `LLM_TIMEOUT` attempt record — evidence — rather than as a runner timeout,
+  // which is not information about the reading.
+  const plan = buildLlmRoutePlan(process.env, 900_000);
 
   const routeVerdicts = plan.eligibility.map((entry) => ({
     routeId: entry.routeId,

@@ -28,8 +28,17 @@ export default defineConfig({
     // implicit 5s timeout here would report a provider's latency as a failure
     // of the reading — and a timed-out test still logs, so the numbers would
     // look real while being stale.
-    testTimeout: 600_000,
-    hookTimeout: 600_000,
+    //
+    // This deadline is deliberately FAR ABOVE the route deadline the harness
+    // passes to `buildLlmRoutePlan`. When the two are equal the runner's timeout
+    // wins the race, the test is reported as timed out, and the adapter's own
+    // abort — the thing under test, and the thing that would have produced a
+    // clean `LLM_TIMEOUT` attempt record — never gets to fire. Measured: with
+    // both at ten minutes, a run reported "Test timed out" and left the request
+    // in flight for hours. The runner must be the outer bound, never the
+    // deciding one.
+    testTimeout: 2_400_000,
+    hookTimeout: 2_400_000,
     reporters: ['default'],
   },
 });

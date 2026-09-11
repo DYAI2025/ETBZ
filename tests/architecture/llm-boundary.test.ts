@@ -484,7 +484,11 @@ function isCredentialShapedFieldName(fieldName: string): boolean {
 const SYNTHETIC_OPENAI_STYLE_KEY = ['sk', 'notarealkey0123456789abcdefghij'].join('-');
 const SYNTHETIC_GOOGLE_STYLE_KEY = `AIza${'Sy0123456789abcdefghijklmnopqrstuvw'}`;
 const SYNTHETIC_BEARER_LITERAL = `Bearer ${'abcdef0123456789abcdef0123456789'}`;
-const SYNTHETIC_OPAQUE_TOKEN = 'Qx7Lm9Pv1Rb8Tn3Wy6Ac5Ef0Hj2Kd4Zs';
+// Assembled at runtime like the three above, and for the same reason: a
+// high-entropy literal sitting in a committed file is a finding for the
+// repository's own secret scanner, whatever the string actually means. A test
+// that proves credential-shaped values are caught must not itself ship one.
+const SYNTHETIC_OPAQUE_TOKEN = ['Qx7Lm9Pv', '1Rb8Tn3Wy', '6Ac5Ef0Hj', '2Kd4Zs'].join('');
 
 // ---------------------------------------------------------------------------
 

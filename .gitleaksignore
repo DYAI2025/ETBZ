@@ -1,0 +1,30 @@
+# =============================================================================
+# ETBZ reviewed secret-scanner findings.
+#
+# Each line is ONE finding fingerprint — `commit:path:rule:line` — that a human
+# has inspected and accepted. A fingerprint is the narrowest exemption gitleaks
+# offers: it pins the commit, the file, the rule AND the line, so an entry here
+# cannot exempt a different value, a later edit of the same line, or the same
+# string appearing anywhere else. No rule is disabled and no path is excluded.
+#
+# The bar for adding a line: the flagged value must be SYNTHETIC, must exist
+# only to prove a guard works, and must already have been rewritten so that the
+# CURRENT working tree no longer contains it. Entries below therefore exempt
+# history only — `scripts/secret-scan.sh` scans the working tree and the history
+# as two separate gates, and the working-tree gate is green on its own.
+# =============================================================================
+
+# b939b596 — two synthetic, high-entropy test fixtures flagged by the upstream
+# `generic-api-key` rule. Neither is a credential: one is an opaque token used
+# by `tests/architecture/llm-boundary.test.ts` to prove that the architecture
+# guard DETECTS credential-shaped literals in `src/`, the other is German prose
+# used by `tests/unit/narrative-draft.test.ts` to prove that a refusal message
+# never echoes untrusted provider content back.
+#
+# Both were rewritten in the following commit to be assembled at runtime from
+# fragments — the same technique `scripts/secret-scan.sh` already uses for its
+# own mutation fixture — so the working tree contains neither literal any more.
+# These two lines cover only their existence in the history of b939b596, which
+# is published and cannot be rewritten.
+b939b596c05ec23d3895e31adaf47cda4e63245f:tests/architecture/llm-boundary.test.ts:generic-api-key:487
+b939b596c05ec23d3895e31adaf47cda4e63245f:tests/unit/narrative-draft.test.ts:generic-api-key:508

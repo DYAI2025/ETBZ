@@ -45,9 +45,16 @@
  * These were one field. The record published `billableCostEur: 0` for every run,
  * and that zero came from the free-model MARKER in a model id — a defensive
  * eligibility guard, not an invoice. A reader had no way to tell it from a
- * measured zero. The type no longer allows that: the observation is nullable and
- * `buildRunEvidence` cannot synthesize one, so an unobserved cost can only ever
- * be recorded as unobserved.
+ * measured zero.
+ *
+ * TWO THINGS NOW STAND BETWEEN A RUN AND A FABRICATED ZERO, and it takes both.
+ * The observation is nullable and `buildRunEvidence` no longer writes it, so the
+ * builder cannot invent one. But the builder does not police it either — it
+ * publishes what the caller passed — so on its own that only moves the invention
+ * one call up the stack. `assertObservedCostWithinCap` closes it: the published
+ * figure must equal what `observedBillableCostEurFrom` derives from the record's
+ * OWN attempts, so a hand-written zero over attempts that reported nothing is
+ * refused rather than filed.
  *
  * Fail-closed is unchanged and now applies to the observation too:
  * `assertObservedCostWithinCap` refuses a record in which a provider reported
@@ -304,8 +311,27 @@ export class ObservedCostExceedsCapError extends Error {
   }
 }
 
+export class ObservedCostNotDerivableError extends Error {
+  readonly code: 'OBSERVED_COST_NOT_DERIVABLE';
+  readonly published: number | null;
+  readonly derived: number | null;
+  constructor(published: number | null, derived: number | null) {
+    super(
+      `the published observed cost does not follow from the run's own attempts: the record says ${published === null ? 'not observed' : String(published)} while its attempts support ${derived === null ? 'not observed' : String(derived)}; an observation that cannot be derived from the evidence is not an observation`,
+    );
+    this.name = 'ObservedCostNotDerivableError';
+    this.code = 'OBSERVED_COST_NOT_DERIVABLE';
+    this.published = published;
+    this.derived = derived;
+  }
+}
+
 /**
- * Refuses a record in which a provider reported a non-zero cost.
+ * Refuses a record whose cost claims do not hold up.
+ *
+ * Two refusals. A provider reported a non-zero cost — the run breached the cap.
+ * Or the published EUR figure does not follow from the record's own attempts —
+ * the number was asserted rather than observed.
  *
  * Checks the RAW REPORTS, not `observedBillableCostEur`. Reading the reduced
  * field would let the one case that most needs refusing slip through: a non-zero
@@ -323,6 +349,17 @@ export function assertObservedCostWithinCap(evidence: NarrativeRunEvidence): voi
     .filter((cost) => cost.amount !== 0);
   if (charged.length > 0) {
     throw new ObservedCostExceedsCapError(charged);
+  }
+  // The published figure must be derivable from the record's own attempts.
+  //
+  // Without this the split is only half enforced: `buildRunEvidence` stopped
+  // inventing the observation, but it publishes whatever the caller hands it, so
+  // a caller could still write `observedBillableCostEur: 0` over attempts that
+  // reported nothing — the original defect, moved one call up the stack. Here the
+  // number has to agree with the evidence it claims to summarise.
+  const derived = observedBillableCostEurFrom(evidence.attempts);
+  if (evidence.observedBillableCostEur !== derived) {
+    throw new ObservedCostNotDerivableError(evidence.observedBillableCostEur, derived);
   }
 }
 

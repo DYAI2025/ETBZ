@@ -710,8 +710,8 @@ describe('ETBZ-25B AC5 F5: a plan with no eligible route refuses before any requ
   });
 });
 
-describe('ETBZ-25B AC5 F6: every attempt of every run states a zero billable cost', () => {
-  it('records zero on the single attempt of an accepted run', async () => {
+describe('ETBZ-25B AC5 F6: every attempt records what the provider reported, not a zero', () => {
+  it('records no observed cost on the single attempt of an accepted run', async () => {
     const transport = fakeTransport([validReply()]);
 
     const result = await generateNarrativeFromPlan(CHAIN.brief, PLAN, transport);

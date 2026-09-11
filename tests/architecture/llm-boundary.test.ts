@@ -1129,8 +1129,13 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     expect(source).toContain('buildReportModel');
     // The refusal is caught by TYPE, not swallowed wholesale: anything that is
     // not a ReportError must still escape unchanged.
-    expect(source).toContain('error instanceof ReportError');
-    expect(source).toContain('throw error;');
+    //
+    // Asserted as the WHOLE rethrow statement, not as the bare substring
+    // 'throw error;'. That substring already appears in this file inside an
+    // unrelated catch 23 lines earlier, so matching it pinned nothing: the
+    // structural-gate catch could be rewritten to swallow a TypeError entirely
+    // and the assertion would still pass on the other statement.
+    expect(source).toContain('if (!(error instanceof ReportError)) {\n      throw error;\n    }');
   });
 
   it('builds the evidence record before the refusal propagates', () => {

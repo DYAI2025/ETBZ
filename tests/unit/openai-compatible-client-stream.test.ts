@@ -243,16 +243,26 @@ describe('ETBZ-25B streaming: refusals', () => {
   });
 
   it('refuses a data frame whose payload parses but is not an object', async () => {
-    // 'null', a bare number and a bare string all survive JSON.parse. Read as a
-    // chunk, each one yields an object with every field undefined and is skipped
-    // in silence — a corrupted frame that looks exactly like a keep-alive.
-    for (const payload of ['null', '42', '"a string"']) {
+    // 'null', a bare number, a bare string and an ARRAY all survive JSON.parse.
+    // Read as a chunk, each yields an object with every field undefined and is
+    // skipped in silence — a corrupted frame that looks exactly like a keep-alive.
+    //
+    // EVERY STREAM HERE CARRIES REAL CONTENT AROUND THE BAD FRAME, and that is
+    // not decoration. With the bad frame alone, the stream yields no content and
+    // the pre-existing empty-content check throws the identical
+    // LLM_CONTRACT_ERROR/terminal this test matches — so the test would pass
+    // whether the frame was refused or silently dropped, and could never fail for
+    // its own reason. With content present, a silent skip RESOLVES.
+    for (const payload of ['null', '42', '"a string"', '["corrupted"]']) {
+      const stream = [
+        'data: {"id":"x","choices":[{"delta":{"content":"{\\"ok\\":1}"}}]}\n\n',
+        `data: ${payload}\n\n`,
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ].join('');
+
       await expect(
-        requestChatCompletion(
-          ROUTE,
-          STREAMING_REQUEST,
-          transportServing(`data: ${payload}\n\ndata: [DONE]\n\n`),
-        ),
+        requestChatCompletion(ROUTE, STREAMING_REQUEST, transportServing(stream)),
         `payload ${payload} must be refused`,
       ).rejects.toMatchObject({
         code: 'LLM_CONTRACT_ERROR',

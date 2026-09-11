@@ -44,7 +44,8 @@ const CONSUMED_ROUTE_VARIABLES: readonly string[] = APPROVED_LLM_ROUTES.flatMap(
 ]);
 
 /**
- * The namespaces a route variable can live in, derived from the consumed names.
+ * The provider namespaces a route variable can live in, derived from the
+ * consumed names.
  *
  * Used only by the INVERSE check, to decide which assignment lines in the file
  * are claiming to configure a route at all. Deriving it means adding a fifth
@@ -53,6 +54,22 @@ const CONSUMED_ROUTE_VARIABLES: readonly string[] = APPROVED_LLM_ROUTES.flatMap(
 const ROUTE_NAMESPACES: readonly string[] = [
   ...new Set(CONSUMED_ROUTE_VARIABLES.map((name) => name.split('_')[0] ?? name)),
 ];
+
+/**
+ * Does this name CLAIM to configure one of the approved routes?
+ *
+ * Matched on underscore-delimited TOKENS, not on a leading prefix, and the
+ * distinction is the entire value of the inverse check. The exact drift this
+ * file exists to catch was named `ETBZ_EXAMPLE_TOKENROUTER_BASE_URL` — a prefix
+ * test reads its namespace as `ETBZ`, finds no route called that, and waves the
+ * stale line through. A token test sees `TOKENROUTER` in the middle and catches
+ * it. Measured: with the prefix form, a half-applied rename that left all twelve
+ * original names in place passed this suite 5/5 green.
+ */
+function claimsARoute(name: string): boolean {
+  const tokens = new Set(name.split('_'));
+  return ROUTE_NAMESPACES.some((namespace) => tokens.has(namespace));
+}
 
 /** `NAME=value` at the start of a line. A commented line is not documentation. */
 interface Assignment {
@@ -72,6 +89,21 @@ function uncommentedAssignments(text: string): readonly Assignment[] {
 }
 
 describe('ETBZ-25B .env.example documents the variables the loader reads', () => {
+  it('derives its expectation from a non-empty route plan (guard self-check)', () => {
+    // Anti-vacuous positive control, the house standard in llm-boundary.test.ts.
+    // Three of the checks below compare a computed list to []. If
+    // APPROVED_LLM_ROUTES were ever empty or filtered — a later slice gating
+    // providers by environment, say — every one of them would pass over nothing
+    // and this file would certify a `.env.example` documenting no route at all.
+    expect(APPROVED_LLM_ROUTES.length).toBeGreaterThanOrEqual(4);
+    expect(CONSUMED_ROUTE_VARIABLES.length).toBe(APPROVED_LLM_ROUTES.length * 3);
+    expect(ROUTE_NAMESPACES.length).toBeGreaterThanOrEqual(4);
+    // And the token matcher recognises BOTH spellings of the drift it guards.
+    expect(claimsARoute('TOKENROUTER_BASE_URL')).toBe(true);
+    expect(claimsARoute('ETBZ_EXAMPLE_TOKENROUTER_BASE_URL')).toBe(true);
+    expect(claimsARoute('ETBZ_ENV')).toBe(false);
+  });
+
   it('documents EVERY variable APPROVED_LLM_ROUTES consumes, uncommented', () => {
     const documented = new Set(uncommentedAssignments(exampleEnvText()).map((a) => a.name));
 
@@ -88,7 +120,7 @@ describe('ETBZ-25B .env.example documents the variables the loader reads', () =>
     // Anything in a provider namespace is claiming to configure that route.
     const orphaned = assignments
       .map((a) => a.name)
-      .filter((name) => ROUTE_NAMESPACES.some((ns) => name.startsWith(`${ns}_`)))
+      .filter(claimsARoute)
       .filter((name) => !consumed.has(name));
 
     expect(orphaned).toEqual([]);

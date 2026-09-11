@@ -3,6 +3,7 @@ import {
   CHAT_COMPLETIONS_PATH,
   LlmProviderError,
   classifyStatus,
+  readReportedCost,
   requestChatCompletion,
 } from '../../src/adapters/llm/openai-compatible-client.js';
 import type {
@@ -805,5 +806,50 @@ describe('the credential never reaches an error surface', () => {
     expect(error.message).toContain(ROUTE.routeId);
     expect(error.message).not.toContain(API_KEY);
     expect(JSON.stringify({ ...error, message: error.message })).not.toContain(API_KEY);
+  });
+});
+
+describe('ETBZ-25B: what a provider reported about cost, read exactly', () => {
+  // `null` here means NOBODY SAID ANYTHING, and it has to stay distinguishable
+  // from a reported zero forever — that is the whole point of the field.
+  it('reports nothing when the usage block carries no cost at all', () => {
+    // The ordinary case: three of the four approved routes return exactly this.
+    expect(readReportedCost({ prompt_tokens: 1200, completion_tokens: 800 })).toBeNull();
+    expect(readReportedCost(undefined)).toBeNull();
+    expect(readReportedCost(null)).toBeNull();
+  });
+
+  it('reads a numeric cost, including a reported zero', () => {
+    // A reported zero is an OBSERVATION and must not read back as "not reported".
+    expect(readReportedCost({ cost: 0 })).toEqual({
+      amount: 0,
+      currency: null,
+      source: 'usage.cost',
+    });
+    expect(readReportedCost({ cost: 0.0042 })?.amount).toBe(0.0042);
+  });
+
+  it('reads a cost the provider serialised as a STRING', () => {
+    // OpenAI-compatible gateways serialise money both ways. Reading only the
+    // number type would turn a reported charge into "nothing was reported" — and
+    // would do it to a NON-ZERO amount, slipping a real cost past the cap guard.
+    expect(readReportedCost({ cost: '0.0042' })?.amount).toBe(0.0042);
+    expect(readReportedCost({ cost: '0' })?.amount).toBe(0);
+  });
+
+  it('keeps the currency the provider stated, and invents none when it did not', () => {
+    // Never normalised, never converted: an exchange rate ETBZ picked for itself
+    // would be a number nobody measured.
+    expect(readReportedCost({ cost: 1.5, currency: 'EUR' })?.currency).toBe('EUR');
+    expect(readReportedCost({ cost: 1.5, cost_currency: 'USD' })?.currency).toBe('USD');
+    // OpenRouter reports an amount and no currency at all.
+    expect(readReportedCost({ cost: 0 })?.currency).toBeNull();
+    expect(readReportedCost({ cost: 1.5, currency: '   ' })?.currency).toBeNull();
+  });
+
+  it('treats a non-numeric cost as no report rather than as a zero', () => {
+    expect(readReportedCost({ cost: 'free' })).toBeNull();
+    expect(readReportedCost({ cost: '' })).toBeNull();
+    expect(readReportedCost({ cost: Number.NaN })).toBeNull();
   });
 });

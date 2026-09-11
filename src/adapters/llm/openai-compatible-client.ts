@@ -209,12 +209,35 @@ export interface ReportedCost {
  * Gemini OpenAI-compatible endpoint return none. So `null` is the ordinary
  * answer here and must stay distinguishable from a reported `0` forever.
  */
+/**
+ * A reported amount, accepting the spellings gateways actually use.
+ *
+ * A NUMERIC STRING COUNTS. OpenAI-compatible gateways serialise money both ways,
+ * and `"0.0042"` is a provider reporting a charge just as plainly as `0.0042`.
+ * Reading only the number type would turn a reported cost into "nothing was
+ * reported", which is the one direction this whole split exists to prevent — and
+ * it would do it to a NON-ZERO amount, slipping a real charge past
+ * `assertObservedCostWithinCap`.
+ *
+ * An empty or non-numeric string is not an amount and reads back as `null`.
+ */
+function costAmount(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function readReportedCost(raw: unknown): ReportedCost | null {
   if (typeof raw !== 'object' || raw === null) {
     return null;
   }
   const usage = raw as Record<string, unknown>;
-  const amount = numberOrNull(usage['cost']);
+  const amount = costAmount(usage['cost']);
   if (amount === null) {
     return null;
   }
@@ -384,11 +407,13 @@ async function readStreamedCompletion(
     } catch {
       throw malformedChunk(route, position, payload.length);
     }
-    // `null`, a bare number and a bare string all survive JSON.parse. A line
-    // that said `data:` and then delivered one of those is as much a contract
-    // violation as one that did not parse, and it must not read back as a chunk
-    // with every field quietly undefined.
-    if (typeof parsed !== 'object' || parsed === null) {
+    // `null`, a bare number, a bare string AND AN ARRAY all survive
+    // JSON.parse. A line that said `data:` and then delivered one of those is as
+    // much a contract violation as one that did not parse, and it must not read
+    // back as a chunk with every field quietly undefined. The array case needs
+    // saying out loud because `typeof [] === 'object'` and `[] !== null`, so the
+    // obvious two-clause check lets it straight through.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       throw malformedChunk(route, position, payload.length);
     }
     const chunk = parsed as StreamChunk;

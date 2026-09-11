@@ -8,6 +8,7 @@ import { buildNarrativeChain } from '../../src/application/interpretation/narrat
 import {
   EvidenceLeakError,
   ObservedCostExceedsCapError,
+  ObservedCostNotDerivableError,
   RUN_EVIDENCE_VERSION,
   assertEvidenceSanitized,
   assertObservedCostWithinCap,
@@ -320,22 +321,37 @@ describe('ETBZ-25B evidence: buildRunEvidence pins the cost contract and anchors
     expect(evidence.observedCostBasis.length).toBeGreaterThan(0);
   });
 
-  it('cannot be made to report an observed zero for a run that observed nothing', () => {
-    // The defect this whole split exists to prevent, asserted directly. A caller
-    // that never measured a cost has no way to publish one: the value it passes
-    // is the value that appears, so an absent measurement stays absent.
+  it('publishes the caller\'s observation verbatim rather than flattening it', () => {
+    // The builder is deliberately NOT the guard here. It records what it was
+    // given — an absent measurement stays absent, and a real one is not rounded
+    // into the policy number. What it must never do is manufacture a value.
     expect(evidenceWith({ observedBillableCostEur: null }).observedBillableCostEur).toBeNull();
-    // And a caller that DID measure one is recorded faithfully rather than being
-    // flattened into the policy number.
     expect(evidenceWith({ observedBillableCostEur: 0 }).observedBillableCostEur).toBe(0);
   });
 
-  it('overwrites a caller-supplied paid value rather than carrying it', () => {
-    // The pinned constants are spread AFTER the caller's input, so a paid value
-    // cannot survive. The types forbid this call, which is why the input is
-    // laundered through an untyped record here: the point is what happens when
-    // the input comes from somewhere the compiler never saw, such as a
-    // deserialised run record.
+  it('refuses an observed zero that the run\'s own attempts do not support', () => {
+    // The other half, and the half that makes the docblock's guarantee true.
+    // Every attempt in BASE_INPUT reports nothing, so a published 0 is a number
+    // the caller asserted rather than observed — exactly the original defect,
+    // moved one call up the stack once the builder stopped inventing it.
+    expect(() => {
+      assertObservedCostWithinCap(evidenceWith({ observedBillableCostEur: 0 }));
+    }).toThrow(ObservedCostNotDerivableError);
+
+    // The truthful record of the same run passes.
+    expect(() => {
+      assertObservedCostWithinCap(evidenceWith({ observedBillableCostEur: null }));
+    }).not.toThrow();
+  });
+
+  it('overwrites caller-supplied POLICY fields rather than carrying them', () => {
+    // The two POLICY fields are spread AFTER the caller's input, so a tampered
+    // cap or a tampered allowPaid cannot survive. The types forbid this call,
+    // which is why the input is laundered through an untyped record here: the
+    // point is what happens when it comes from somewhere the compiler never saw,
+    // such as a deserialised run record. The OBSERVATION is deliberately not
+    // clamped this way — clamping it would delete the evidence that a run cost
+    // money — so it is refused instead, by the two tests above.
     const tampered: Record<string, unknown> = {
       ...BASE_INPUT,
       approvedCostCapEur: 99,

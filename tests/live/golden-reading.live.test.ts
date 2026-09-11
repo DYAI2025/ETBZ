@@ -29,7 +29,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildLlmRoutePlan } from '../../src/app/configuration/llm-routes.js';
-import { NarrativeProviderError } from '../../src/application/interpretation/errors.js';
+import { NarrativeProviderError, ReportError } from '../../src/application/interpretation/errors.js';
 import { generateNarrativeFromPlan } from '../../src/adapters/llm/llm-narrative-provider.js';
 import { buildGoldenReading, renderGoldenReadingText } from '../../src/application/interpretation/golden-reading.js';
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
@@ -124,14 +124,35 @@ async function runOnce(
 
   // The structural gate. It re-derives the chain from the HoroscopeModel, so a
   // pass here is a statement about the chart, not about the brief we handed out.
-  const report = buildReportModel({
-    model,
-    brief: chain.brief,
-    providerOutput: result.providerOutput,
-  });
+  //
+  // ITS REFUSAL MUST LEAVE EVIDENCE, and it did not. `buildReportModel` throws,
+  // and the throw used to travel straight past `buildRunEvidence` below — so a
+  // candidate blocked for citing a fact that is not in the chart produced NO
+  // record at all, while this file's own docblock promised one. Measured, not
+  // imagined: a real run on a real route was refused for exactly that and left
+  // nothing to review. The run that most needs a reviewable record was the one
+  // case that had none.
+  let report: ReturnType<typeof buildReportModel> | null = null;
+  let structuralBlocker: ReportError | null = null;
+  try {
+    report = buildReportModel({
+      model,
+      brief: chain.brief,
+      providerOutput: result.providerOutput,
+    });
+  } catch (error) {
+    if (!(error instanceof ReportError)) {
+      throw error;
+    }
+    structuralBlocker = error;
+  }
 
-  const qa = runSemanticNarrativeQa(report);
-  const reading = qa.status === 'PASS' ? buildGoldenReading(report, qa) : null;
+  // The semantic gate runs only on a report that exists. A gate that did not
+  // execute is recorded as NOT_RUN and never as a pass.
+  const qa = report === null ? null : runSemanticNarrativeQa(report);
+  const reading = qa !== null && report !== null && qa.status === 'PASS'
+    ? buildGoldenReading(report, qa)
+    : null;
   const readingText = reading === null ? null : renderGoldenReadingText(reading);
 
   const evidence = buildRunEvidence({
@@ -145,10 +166,10 @@ async function runOnce(
     attempts: result.attempts,
     acceptedRouteId: result.acceptedRouteId,
     acceptedModel: result.acceptedModel,
-    reportStructuralHash: report.structuralHash,
-    structuralGate: 'PASS',
-    semanticQaStatus: qa.status,
-    semanticQaFindings: qa.findings,
+    reportStructuralHash: report?.structuralHash ?? null,
+    structuralGate: structuralBlocker === null ? 'PASS' : 'BLOCKED',
+    semanticQaStatus: qa?.status ?? 'NOT_RUN',
+    semanticQaFindings: qa?.findings ?? [],
     goldenReadingStatus:
       reading === null ? 'BLOCKED' : 'CANDIDATE_READY_FOR_HUMAN_REVIEW',
     goldenReadingHash: reading?.structuralHash ?? null,
@@ -183,9 +204,13 @@ async function runOnce(
   console.log(`prompt        : ${result.prompt.promptVersion} / ${result.prompt.promptStructuralHash}`);
   console.log(`route         : ${result.acceptedRouteId} (${result.acceptedModel})`);
   console.log(`attempts      : ${JSON.stringify(result.attempts, null, 1)}`);
-  console.log(`report hash   : ${report.structuralHash}`);
-  console.log(`semantic QA   : ${qa.status}`);
-  for (const finding of qa.findings) {
+  console.log(`report hash   : ${report?.structuralHash ?? '(no report - structural gate blocked)'}`);
+  console.log(`structural    : ${structuralBlocker === null ? 'PASS' : `BLOCKED ${structuralBlocker.code}`}`);
+  if (structuralBlocker !== null) {
+    console.log(`          ${structuralBlocker.message}`);
+  }
+  console.log(`semantic QA   : ${qa?.status ?? 'NOT_RUN'}`);
+  for (const finding of qa?.findings ?? []) {
     console.log(`  BLOCKED ${finding.code} | ${finding.themeId ?? '-'} | ${finding.surface ?? '-'} | ${finding.term ?? '-'}`);
     console.log(`          ${finding.message}`);
   }
@@ -194,7 +219,14 @@ async function runOnce(
     console.log(`\n${readingText}`);
   }
 
-  return { evidence, readingText, findings: qa.findings };
+  // Only now, with the record and the findings persisted, does the refusal
+  // propagate. A blocked candidate is a real outcome of this slice and must be
+  // reviewable; failing before the write is what made it invisible.
+  if (structuralBlocker !== null) {
+    throw structuralBlocker;
+  }
+
+  return { evidence, readingText, findings: qa?.findings ?? [] };
 }
 
 describe('ETBZ-25B live provider run', () => {

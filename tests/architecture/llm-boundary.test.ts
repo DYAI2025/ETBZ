@@ -1102,3 +1102,58 @@ describe('ETBZ-25B: the LLM slice modules sit where the architecture says', () =
     expect(existsSync(resolve(REPO_ROOT, 'src/adapters/llm/semantic-qa.ts'))).toBe(false);
   });
 });
+
+describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => {
+  // The live harness is excluded from the CI gate by design — it needs a
+  // network, a credential and a third party's availability. That exclusion is
+  // exactly why this property needs a home INSIDE the gate: without one, the
+  // harness's refusal path is verified by nobody until a real run hits it.
+  //
+  // It already went wrong once, measured on a real run against a real route.
+  // `buildReportModel` threw on a candidate that cited a fact absent from the
+  // chart, and the throw travelled straight past `buildRunEvidence` — so the
+  // blocked candidate produced NO evidence file at all, while the harness's own
+  // docblock promised it writes "the evidence record and the findings anyway".
+  // A structural refusal is a real result of this slice; a result nobody can
+  // review is barely better than no result.
+  const HARNESS = resolve(REPO_ROOT, 'tests/live/golden-reading.live.test.ts');
+
+  function harnessSource(): string {
+    return readFileSync(HARNESS, 'utf8');
+  }
+
+  it('catches the structural gate refusal instead of letting it escape', () => {
+    const source = harnessSource();
+    // Positive control: the assertions below are vacuous if the file moved.
+    expect(existsSync(HARNESS)).toBe(true);
+    expect(source).toContain('buildReportModel');
+    // The refusal is caught by TYPE, not swallowed wholesale: anything that is
+    // not a ReportError must still escape unchanged.
+    expect(source).toContain('error instanceof ReportError');
+    expect(source).toContain('throw error;');
+  });
+
+  it('builds the evidence record before the refusal propagates', () => {
+    const source = harnessSource();
+    const caught = source.indexOf('structuralBlocker = error');
+    const built = source.indexOf('const evidence = buildRunEvidence(');
+    const written = source.indexOf('writeFileSync(');
+    const rethrown = source.lastIndexOf('throw structuralBlocker;');
+
+    // Ordering IS the property. Evidence has to be assembled and on disk before
+    // the refusal leaves the function, or the blocked run is invisible again.
+    expect(caught).toBeGreaterThan(-1);
+    expect(built).toBeGreaterThan(caught);
+    expect(written).toBeGreaterThan(built);
+    expect(rethrown).toBeGreaterThan(written);
+  });
+
+  it('never records a gate that did not execute as a pass', () => {
+    const source = harnessSource();
+    // When the structural gate blocks there is no report, so semantic QA cannot
+    // have run. NOT_RUN and PASS are different facts and the record must not
+    // blur them — the same rule the cost fields now follow.
+    expect(source).toContain("semanticQaStatus: qa?.status ?? 'NOT_RUN'");
+    expect(source).toContain("structuralGate: structuralBlocker === null ? 'PASS' : 'BLOCKED'");
+  });
+});

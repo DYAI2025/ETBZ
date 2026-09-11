@@ -46,6 +46,8 @@ import { containsTerm, findTermSpans, normalizeForMatch } from './chart-symbol-l
 import { NarrativeQaError } from './errors.js';
 import type { NarrativeQaErrorCode } from './errors.js';
 import type { ChartFact } from './feature-set.js';
+import { NARRATIVE_QA_POLICY } from './narrative-qa-policy.js';
+import type { NarrativeQaPolicy } from './narrative-qa-policy.js';
 import type { ReportModel, ReportSection } from './report-model.js';
 import {
   BARNUM_PHRASES,
@@ -101,53 +103,20 @@ export interface NarrativeQaFinding {
   readonly message: string;
 }
 
-export interface NarrativeQaPolicy {
-  /**
-   * How far around a chart term the role check looks.
-   *
-   * A role word further away than this is not describing that symbol, it is
-   * describing something else in the sentence. Widening the window would turn
-   * ordinary German prose into a stream of false refusals; narrowing it would
-   * miss `der Erdzweig Xin`.
-   */
-  readonly roleWindowChars: number;
-  /**
-   * Distinct chart terms that must actually APPEAR IN THE PROSE across the
-   * whole report.
-   *
-   * The structural gate already requires distinct CITED facts. This is the
-   * different and harder property: a reading can cite four facts and never name
-   * one of them, which is exactly what a generic text does.
-   */
-  readonly minDistinctChartTermsInProse: number;
-  /**
-   * Distinct chart terms EACH section's prose must name.
-   *
-   * One is not enough, and the reason is a specific attack: a reading can be
-   * built by writing ONE universal paragraph and mail-merging a different chart
-   * symbol into each copy. Every section then names a cited term, every section
-   * differs textually so the duplicate-prose guard is silent, and the whole
-   * report is a template. Requiring two terms per chapter means a section has to
-   * be about a combination, which a mail-merge cannot fake with one slot.
-   */
-  readonly minChartTermsPerSection: number;
-  /** Sections that must qualify as synthesis rather than lookup. */
-  readonly minSynthesisSections: number;
-  /** Distinct fact ROLES a section's prose must name to count as synthesis. */
-  readonly minSynthesisRolesInProse: number;
-}
-
 /**
- * The thresholds are a FLOOR a generic text fails, not a target good text has
- * to strain for — the same stance `specificity-policy.ts` takes structurally.
+ * The policy the gates judge against, re-exported from its own module.
+ *
+ * It lives in `narrative-qa-policy.ts` because `prompt-policy.ts` has to
+ * ANNOUNCE these same numbers, and a floor that is judged here but stated
+ * separately over there drifts — it already did once, with R7 asking for one
+ * chart term per paragraph while this gate blocked anything under two. Both
+ * modules now read one constant, and neither imports the other.
+ *
+ * Re-exported rather than moved outright so every established import path
+ * (`semantic-qa.js`) keeps resolving.
  */
-export const NARRATIVE_QA_POLICY: NarrativeQaPolicy = {
-  roleWindowChars: 32,
-  minDistinctChartTermsInProse: 4,
-  minChartTermsPerSection: 2,
-  minSynthesisSections: 1,
-  minSynthesisRolesInProse: 2,
-};
+export type { NarrativeQaPolicy } from './narrative-qa-policy.js';
+export { NARRATIVE_QA_POLICY } from './narrative-qa-policy.js';
 
 export const NARRATIVE_QA_VERSION = 'etbz-25b.narrative-qa.v1' as const;
 

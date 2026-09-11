@@ -342,14 +342,34 @@ export class ObservedCostNotDerivableError extends Error {
  * Currency-blind on purpose. No non-zero amount is acceptable under a 0.00 cap
  * in any denomination, so the guard never needs a rate to decide.
  */
-export function assertObservedCostWithinCap(evidence: NarrativeRunEvidence): void {
-  const charged = evidence.attempts
-    .map((attempt) => attempt.reportedCost)
+/** The only thing the ledger-level cap guard needs to know about an attempt. */
+export interface CostReportingAttempt {
+  readonly reportedCost?: EvidenceReportedCost | null;
+}
+
+/**
+ * Refuses an attempt ledger in which a provider reported a non-zero cost.
+ *
+ * Separate from the record-level guard below because THE LEDGER OUTLIVES THE
+ * RECORD. When a run is refused — a terminal transport failure, a truncated
+ * answer, output that will not parse — no evidence record is ever built and the
+ * attempts travel out on the error instead. Those are precisely the runs that
+ * can have been charged for: a route that answered and was then rejected still
+ * answered, and still billed for it if it bills. A cap check reachable only
+ * through a completed record would never see any of them.
+ */
+export function assertNoReportedCharge(attempts: readonly CostReportingAttempt[]): void {
+  const charged = attempts
+    .map((attempt) => attempt.reportedCost ?? null)
     .filter((cost): cost is EvidenceReportedCost => cost !== null)
     .filter((cost) => cost.amount !== 0);
   if (charged.length > 0) {
     throw new ObservedCostExceedsCapError(charged);
   }
+}
+
+export function assertObservedCostWithinCap(evidence: NarrativeRunEvidence): void {
+  assertNoReportedCharge(evidence.attempts);
   // The published figure must be derivable from the record's own attempts.
   //
   // Without this the split is only half enforced: `buildRunEvidence` stopped

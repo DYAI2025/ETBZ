@@ -35,6 +35,7 @@ import { buildGoldenReading, renderGoldenReadingText } from '../../src/applicati
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
 import {
   assertEvidenceSanitized,
+  assertNoReportedCharge,
   assertObservedCostWithinCap,
   buildRunEvidence,
   observedBillableCostEurFrom,
@@ -118,6 +119,13 @@ async function runOnce(
           .map((v) => `${v.routeId}=${v.eligible ? 'eligible' : (v.ineligibleReason ?? 'ineligible')}`)
           .join(', ')}`,
       );
+      // A REFUSED RUN CAN STILL HAVE BEEN CHARGED FOR, and this is the only
+      // place that can notice it. No evidence record exists on this path, so the
+      // record-level cap check further down is unreachable here — yet a route
+      // that answered and was then rejected still did the work it bills for. A
+      // truncated reading and unparseable output are both refusals that arrive
+      // AFTER the provider has generated tokens.
+      assertNoReportedCharge(error.attempts);
     }
     throw error;
   }

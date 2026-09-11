@@ -164,6 +164,20 @@ export interface NarrativeRouteAttemptLike {
   readonly outcome: string;
   readonly errorCode: string | null;
   readonly failoverAuthorized: boolean;
+  /**
+   * What the provider reported this attempt cost, when the shape carries it.
+   *
+   * OPTIONAL because this interface is the narrow structural echo described
+   * above, and several fixtures build it directly. The real `RouteAttempt`
+   * always supplies it, so a live refusal carries the cost reports out of the
+   * run — which is the only way the cap can be checked on a path where no
+   * evidence record is ever built.
+   */
+  readonly reportedCost?: {
+    readonly amount: number;
+    readonly currency: string | null;
+    readonly source: string;
+  } | null;
 }
 
 export class NarrativeProviderError extends Error {

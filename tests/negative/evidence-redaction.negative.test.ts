@@ -9,6 +9,7 @@ import {
   EvidenceLeakError,
   ObservedCostExceedsCapError,
   ObservedCostNotDerivableError,
+  assertNoReportedCharge,
   RUN_EVIDENCE_VERSION,
   assertEvidenceSanitized,
   assertObservedCostWithinCap,
@@ -327,6 +328,35 @@ describe('ETBZ-25B evidence: buildRunEvidence pins the cost contract and anchors
     // into the policy number. What it must never do is manufacture a value.
     expect(evidenceWith({ observedBillableCostEur: null }).observedBillableCostEur).toBeNull();
     expect(evidenceWith({ observedBillableCostEur: 0 }).observedBillableCostEur).toBe(0);
+  });
+
+  it('checks the cap on a REFUSED run, where no evidence record exists', () => {
+    // The path the record-level guard cannot reach. A terminal failure, a
+    // truncated answer or unparseable output ends the run before any evidence is
+    // built, and the attempts leave on the error instead — so a cap check that
+    // only ever sees a completed record never sees the runs most likely to have
+    // been charged for. A route that answered and was then rejected still
+    // generated the tokens it bills for.
+    const chargedLedger = [
+      { order: 1, routeId: 'tokenrouter', outcome: 'transient_failure', errorCode: 'LLM_TIMEOUT', failoverAuthorized: true, reportedCost: null },
+      { order: 4, routeId: 'openrouter', outcome: 'content_rejected', errorCode: 'PROVIDER_OUTPUT_TRUNCATED', failoverAuthorized: false, reportedCost: { amount: 0.0021, currency: 'USD', source: 'usage.cost' } },
+    ];
+
+    expect(() => {
+      assertNoReportedCharge(chargedLedger);
+    }).toThrow(ObservedCostExceedsCapError);
+
+    // A ledger that reported nothing, and one that reported zero, both pass.
+    expect(() => {
+      assertNoReportedCharge(chargedLedger.map((a) => ({ ...a, reportedCost: null })));
+    }).not.toThrow();
+    expect(() => {
+      assertNoReportedCharge([{ reportedCost: { amount: 0, currency: null, source: 'usage.cost' } }]);
+    }).not.toThrow();
+    // An attempt shape that carries no cost field at all is not a charge.
+    expect(() => {
+      assertNoReportedCharge([{}]);
+    }).not.toThrow();
   });
 
   it('refuses an observed zero that the run\'s own attempts do not support', () => {

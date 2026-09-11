@@ -50,23 +50,27 @@
  * it was meant to judge stops being a gate, and the resemblance that would
  * drive such a repair is exactly the thing that produced the defect.
  *
- * THREE OF THE ANNOUNCED LISTS ARE THE GATE’S OWN, AND THE REST ARE NOT YET.
- * The floors in R7, R8 and R9 are rendered from `NARRATIVE_QA_POLICY`, and the
+ * EVERY WORD LIST THE GATES REFUSE OUTRIGHT IS RENDERED FROM ITS CONSTANT.
+ * The floors in R7, R8 and R9 come from `NARRATIVE_QA_POLICY`; the
  * provisionality and certainty vocabularies from `PROVISIONALITY_TERMS` and
- * `CERTAINTY_TERMS` — the same constants `semantic-qa.ts` judges against, so a
- * threshold or a word cannot move on one side alone. A hand-copied second list
- * is how v1 came to name six of twenty-five refused certainty words and to
- * scope the ban to `prose` while the gate read every surface: both halves were
- * honest, and together they were a trap.
+ * `CERTAINTY_TERMS`; since v3 the product-safety vocabulary from
+ * `PROHIBITED_CLAIM_CLASSES`, grouped by claim class so the model sees the
+ * meaning and the exact forms, and the Barnum vocabulary from `BARNUM_PHRASES`;
+ * and the out-of-scope method vocabulary from `NOT_EVALUATED_METHODS`. These
+ * are the constants the gates judge against, so a threshold or a word cannot
+ * move on one side alone.
  *
- * THE PRODUCT-SAFETY WORDING IS STILL HAND-WRITTEN, and it is named here
- * rather than implied. `SYSTEM_MESSAGE` spells out thirteen of the seventy-two
- * terms `PROHIBITED_CLAIM_CLASSES` blocks on, and states the Barnum ban as a
- * principle while `BARNUM_PHRASES` blocks on twenty-three specific phrases.
- * Neither divergence was introduced here and neither was in the scope of this
- * repair, so both are recorded as OPEN: they are the same class of gap the
- * certainty list had, and a provider can still be refused by a product-safety
- * term it was never shown.
+ * A hand-copied second list is how every earlier version fell into the same
+ * trap: v1 named six of twenty-five refused certainty words, and v2 named
+ * thirteen of seventy-two prohibited-claim terms and none of twenty-three
+ * Barnum phrases. Each list was honest, and together they refused a provider
+ * for words it had never been shown.
+ *
+ * WHAT IS STILL STATED AS A RULE RATHER THAN AS A LIST: the role words the
+ * fact-role gate reads as classifiers (`ROLE_TERMS`). Those are not refused
+ * outright — only when one stands next to a symbol of a different role — so
+ * the prompt names the correct role word for every fact and tells the model to
+ * write none when unsure, instead of printing the classifier vocabulary.
  */
 
 import { structuralHash } from '../../domain/structural-hash.js';
@@ -78,13 +82,15 @@ import type { PrimaryTheme } from './primary-theme.js';
 import { NARRATIVE_QA_POLICY } from './narrative-qa-policy.js';
 import type { NarrativeQaPolicy } from './narrative-qa-policy.js';
 import {
+  BARNUM_PHRASES,
   CERTAINTY_TERMS,
+  PROHIBITED_CLAIM_CLASSES,
   PROVISIONALITY_TERMS,
   ROLES_BY_FACT_KIND,
 } from './semantic-qa-lexicon.js';
-import type { ChartFactRole } from './semantic-qa-lexicon.js';
+import type { ChartFactRole, ProhibitedClaimClass } from './semantic-qa-lexicon.js';
 
-export const PROMPT_VERSION = 'etbz-25b.narrative-prompt.v2' as const;
+export const PROMPT_VERSION = 'etbz-25b.narrative-prompt.v3' as const;
 export const INTERPRETATION_POLICY_VERSION = 'etbz-25b.interpretation-policy.v1' as const;
 
 /**
@@ -104,6 +110,20 @@ export const ROLE_PROSE_LABEL: Readonly<Record<ChartFactRole, string>> = {
   polarity: 'Polarität',
   day_master: 'Tagesmeister',
   month_command: 'Monatskommando',
+} as const;
+
+/**
+ * The German heading the prompt gives each prohibited claim class.
+ *
+ * Keyed by the gate's own `classId` type, so a claim class added to
+ * `PROHIBITED_CLAIM_CLASSES` without a heading here is a compile error rather
+ * than a class the provider is refused for and never told about.
+ */
+export const CLAIM_CLASS_PROSE_LABEL: Readonly<Record<ProhibitedClaimClass['classId'], string>> = {
+  deterministic_fate: 'Deterministische Schicksals- oder Zukunftsversprechen',
+  medical: 'Medizinische Aussagen oder Ratschläge',
+  legal: 'Rechtliche Aussagen oder Ratschläge',
+  financial: 'Finanzielle Aussagen oder Ratschläge',
 } as const;
 
 export interface NarrativePrompt {
@@ -244,11 +264,21 @@ const SYSTEM_MESSAGE = [
   '- einen Chartfakt erfinden, ändern, ergänzen oder anders benennen;',
   '- einen als VORLÄUFIG markierten Fakt als gesichert behandeln;',
   '- eine Schulregel als empirisch bewiesene Wahrheit ausgeben;',
-  '- deterministische Schicksals- oder Zukunftsversprechen machen',
-  '  (kein "vorbestimmt", "wird eintreten", "Prognose", "Vorhersage", "unausweichlich");',
-  '- medizinische, rechtliche oder finanzielle Aussagen oder Ratschläge machen',
-  '  (keine Diagnose, Krankheit, Therapie, Medikamente, Anwalt, Klage, Investition, Aktien);',
+  '- deterministische Schicksals- oder Zukunftsversprechen machen;',
+  '- medizinische, rechtliche oder finanzielle Aussagen oder Ratschläge machen;',
   '- Barnum-Sätze schreiben, die auf fast jeden Menschen zutreffen.',
+  '',
+  'VERBOTENE BEGRIFFE — jeder einzelne verwirft den gesamten Report. Das gilt in "prose"',
+  'UND in "uncertaintyNotes", auch in einer Verneinung und auch in alltäglicher Bedeutung:',
+  ...PROHIBITED_CLAIM_CLASSES.map(
+    (claimClass) =>
+      `- ${CLAIM_CLASS_PROSE_LABEL[claimClass.classId]}: ${quotedTerms(claimClass.terms)}`,
+  ),
+  '',
+  'VERBOTENE BARNUM-WENDUNGEN — jede davon verwirft den gesamten Report:',
+  `  ${quotedTerms(BARNUM_PHRASES)}`,
+  'Diese Liste ist nur die Untergrenze: Auch jeder andere Satz, der auf fast jeden',
+  'Menschen zutrifft, ist verboten, selbst wenn er in keiner Liste steht.',
   '',
   'Deine Antwort ist ausschließlich ein JSON-Objekt. Kein Markdown, kein Codefence, kein Vorwort.',
 ].join('\n');

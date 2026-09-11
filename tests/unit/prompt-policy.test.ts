@@ -14,6 +14,7 @@ import {
   NOT_EVALUATED_METHODS,
 } from '../../src/application/interpretation/method-scope.js';
 import {
+  CLAIM_CLASS_PROSE_LABEL,
   INTERPRETATION_POLICY_VERSION,
   PROMPT_VERSION,
   ROLE_PROSE_LABEL,
@@ -385,7 +386,11 @@ describe('ETBZ-25B P2: the prompt is pure, bound to its brief and self-identifyi
     // run returned a fabricated factId, and the prompt text was changed in
     // response. Two different prompts sharing one version string would make
     // every evidence record that cites it ambiguous.
-    expect(PROMPT_VERSION).toBe('etbz-25b.narrative-prompt.v2');
+    //
+    // v3 is the THIRD iteration: it prints the product-safety and Barnum
+    // vocabularies the gate already refused on, which changes the text the
+    // model is given even though no rule changed.
+    expect(PROMPT_VERSION).toBe('etbz-25b.narrative-prompt.v3');
     // The INTERPRETATION POLICY did NOT move, and that asymmetry is the
     // claim: v2 states rules the gates already enforced — the factId's
     // provenance, the full certainty vocabulary, the report-wide anchoring
@@ -1092,64 +1097,191 @@ describe('ETBZ-25B P10: every floor the prompt announces is the policy’s own n
   });
 });
 
-describe('ETBZ-25B P11: the divergences this repair did NOT close are measured, not implied', () => {
-  // Repair B closed the certainty vocabulary. Two lists of the same kind are
-  // still hand-written in `SYSTEM_MESSAGE`, and the module docblock says so.
-  //
-  // A docblock that states a number is a claim. These cases measure it, so the
-  // stated gap cannot quietly grow — and so the next round starts from a figure
-  // somebody counted rather than from a sentence somebody wrote.
+/** Every term of `terms` the gate's own matcher finds nowhere in `text`. */
+function uncoveredIn(text: string, terms: readonly string[]): readonly string[] {
+  const normalized = normalizeForMatch(text);
+  return terms.filter((term) => !containsTerm(normalized, term));
+}
 
-  function namedIn(prompt: NarrativePrompt, terms: readonly string[]): readonly string[] {
-    const whole = normalizeForMatch(`${prompt.system}\n${prompt.user}`);
-    return terms.filter((term) => containsTerm(whole, term));
+/** The whole outbound text of a prompt, both messages. */
+function wholeOf(prompt: NarrativePrompt): string {
+  return `${prompt.system}\n${prompt.user}`;
+}
+
+const ALL_PROHIBITED_TERMS = PROHIBITED_CLAIM_CLASSES.flatMap((claimClass) => claimClass.terms);
+
+/**
+ * THE EXACT v2 SYSTEM MESSAGE, copied from `16dce27` rather than paraphrased.
+ *
+ * It is the defect shape this block exists to refuse: a hand-written safety
+ * line naming thirteen of the seventy-two prohibited-claim terms and none of
+ * the twenty-three Barnum phrases. A lookalike would prove only that the check
+ * refuses the lookalike.
+ */
+const V2_SYSTEM_MESSAGE = [
+  'Du bist der Interpretationsautor für ETBZ, ein BaZi-Reflexionsprodukt.',
+  '',
+  'PRODUKTHALTUNG (nicht verhandelbar):',
+  '- BaZi ist bei ETBZ ein traditionelles, symbolisches Reflexions- und Unterhaltungsmodell.',
+  '- Es ist KEINE wissenschaftliche Diagnose und KEINE deterministische Zukunftsprognose.',
+  '- Du schreibst Reflexionsmaterial: Beobachtungen, Spannungen, Fragen. Keine Versprechen.',
+  '',
+  'DU DARFST ausdrücklich:',
+  '- mehrere echte Chart-Signale zu einer neuen, plausiblen Deutung verbinden;',
+  '- psychologisch nachvollziehbare Ableitungen und Metaphern formulieren;',
+  '- Ambivalenzen und innere Spannungen beschreiben;',
+  '- eigene Formulierungen erfinden, die in keiner Tabelle stehen;',
+  '- Reflexionsfragen stellen.',
+  '',
+  'DU DARFST NIEMALS:',
+  '- einen Chartfakt erfinden, ändern, ergänzen oder anders benennen;',
+  '- einen als VORLÄUFIG markierten Fakt als gesichert behandeln;',
+  '- eine Schulregel als empirisch bewiesene Wahrheit ausgeben;',
+  '- deterministische Schicksals- oder Zukunftsversprechen machen',
+  '  (kein "vorbestimmt", "wird eintreten", "Prognose", "Vorhersage", "unausweichlich");',
+  '- medizinische, rechtliche oder finanzielle Aussagen oder Ratschläge machen',
+  '  (keine Diagnose, Krankheit, Therapie, Medikamente, Anwalt, Klage, Investition, Aktien);',
+  '- Barnum-Sätze schreiben, die auf fast jeden Menschen zutreffen.',
+  '',
+  'Deine Antwort ist ausschließlich ein JSON-Objekt. Kein Markdown, kein Codefence, kein Vorwort.',
+].join('\n');
+
+/** The quoted terms on the single system line that starts with `prefix`. */
+function quotedTermsOnLine(system: string, prefix: string): readonly string[] {
+  const lines = system.split('\n').filter((line) => line.startsWith(prefix));
+  if (lines.length !== 1) {
+    throw new Error(`expected exactly one line starting with "${prefix}", found ${String(lines.length)}`);
   }
+  const [line] = lines;
+  if (line === undefined) throw new Error('unreachable: length was checked');
+  return [...line.slice(prefix.length).matchAll(/"([^"]*)"/gu)].map((match) => match[1] ?? '');
+}
 
-  it('names 13 of the 72 prohibited-claim terms, which is the documented gap', () => {
-    const all = PROHIBITED_CLAIM_CLASSES.flatMap((claimClass) => claimClass.terms);
-    expect(all).toHaveLength(72);
-    expect(namedIn(KNOWN_PROMPT, all)).toHaveLength(13);
-    // The same on the other chart: the product-safety wording is static, so a
-    // chart cannot be the reason a term is missing.
-    expect(namedIn(UNKNOWN_PROMPT, all)).toHaveLength(13);
+const BARNUM_HEADING = 'VERBOTENE BARNUM-WENDUNGEN — jede davon verwirft den gesamten Report:';
+
+/** The quoted terms of the line following the Barnum heading. */
+function barnumTermsOf(system: string): readonly string[] {
+  const lines = system.split('\n');
+  const index = lines.indexOf(BARNUM_HEADING);
+  if (index < 0) throw new Error('the system message states no Barnum vocabulary heading');
+  const termLine = lines[index + 1];
+  if (termLine === undefined) throw new Error('the Barnum heading carries no term line');
+  return [...termLine.matchAll(/"([^"]*)"/gu)].map((match) => match[1] ?? '');
+}
+
+describe('ETBZ-25B P11: every word list the gates refuse outright reaches the provider', () => {
+  // v2 closed the certainty vocabulary and MEASURED the two it left open: the
+  // prompt named 13 of the 72 prohibited-claim terms and 0 of the 23 Barnum
+  // phrases, while the gate refused all of them on every surface. v3 closes
+  // both. These cases are the same measurement, now required to be complete.
+
+  it('names every one of the prohibited-claim terms, on both charts', () => {
+    expect(ALL_PROHIBITED_TERMS).toHaveLength(72);
+    expect(uncoveredIn(wholeOf(KNOWN_PROMPT), ALL_PROHIBITED_TERMS)).toEqual([]);
+    expect(uncoveredIn(wholeOf(UNKNOWN_PROMPT), ALL_PROHIBITED_TERMS)).toEqual([]);
   });
 
-  it('names none of the 23 Barnum phrases, stating the ban as a principle instead', () => {
+  it('names every one of the Barnum phrases, on both charts', () => {
     expect(BARNUM_PHRASES).toHaveLength(23);
-    expect(namedIn(KNOWN_PROMPT, BARNUM_PHRASES)).toEqual([]);
-    expect(namedIn(UNKNOWN_PROMPT, BARNUM_PHRASES)).toEqual([]);
-    // The principle IS stated, so this is an incomplete contract and not an
-    // absent one.
-    expect(KNOWN_PROMPT.system).toContain(
-      'Barnum-Sätze schreiben, die auf fast jeden Menschen zutreffen.',
-    );
+    expect(uncoveredIn(wholeOf(KNOWN_PROMPT), BARNUM_PHRASES)).toEqual([]);
+    expect(uncoveredIn(wholeOf(UNKNOWN_PROMPT), BARNUM_PHRASES)).toEqual([]);
   });
 
-  it('the certainty vocabulary, by contrast, is stated in full', () => {
-    // The control that makes the two cases above a measurement of a REMAINING
-    // gap rather than a statement that the prompt never names a lexicon.
-    //
-    // Measured on the UNKNOWN-time chart, because that is the only chart whose
-    // prompt carries the certainty block at all: the rule applies to sections
-    // citing a provisional fact, and the known-time chart has none. Running
-    // this control on the known-time prompt found one term of twenty-five —
-    // `unausweichlich`, which reaches it through the static fate ban — and
-    // that is the correct behaviour, not a gap.
-    expect(namedIn(UNKNOWN_PROMPT, CERTAINTY_TERMS)).toHaveLength(CERTAINTY_TERMS.length);
-    expect(CERTAINTY_TERMS.length).toBeGreaterThan(20);
+  it('keeps the certainty vocabulary complete where it applies', () => {
+    // Measured on the UNKNOWN-time chart: the certainty rule applies to sections
+    // citing a provisional fact, and only that chart has any.
+    expect(uncoveredIn(wholeOf(UNKNOWN_PROMPT), CERTAINTY_TERMS)).toEqual([]);
     expect(UNKNOWN_CHAIN.brief.uncertainty.provisionalFactIds.length).toBeGreaterThan(0);
-    expect(KNOWN_CHAIN.brief.uncertainty.provisionalFactIds).toEqual([]);
   });
 
-  it('the docblock states exactly these numbers', () => {
-    // The prose and the measurement are checked against each other, because a
-    // docblock nobody verifies is how "every closed word list is rendered from
-    // its constant" came to be written about a module that hand-writes two.
+  it('the docblock no longer describes a gap the code has closed', () => {
     const source = readFileSync(
       resolve(process.cwd(), 'src/application/interpretation/prompt-policy.ts'),
       'utf8',
     );
-    expect(source).toContain('thirteen of the seventy-two');
-    expect(source).toContain('twenty-three specific phrases');
+    expect(source).toContain('EVERY WORD LIST THE GATES REFUSE OUTRIGHT IS RENDERED FROM ITS CONSTANT.');
+    expect(source).not.toContain('THE PRODUCT-SAFETY WORDING IS STILL HAND-WRITTEN');
+    // The history it records is the measured one.
+    expect(source).toContain('thirteen of seventy-two prohibited-claim terms and none of twenty-three');
+  });
+});
+
+describe('ETBZ-25B P12: the product-safety and Barnum contract is the gate’s own vocabulary', () => {
+  // Coverage alone (P11) would pass a prompt that dumped every term into one
+  // undifferentiated list. The contract is stronger: each claim class appears
+  // under its own heading with EXACTLY that class's terms, so the model sees
+  // what a word is forbidden FOR, and the gate cannot gain a term the prompt
+  // does not print.
+
+  it('gives every claim class the gate declares a heading, and no other', () => {
+    expect(Object.keys(CLAIM_CLASS_PROSE_LABEL).sort()).toEqual(
+      PROHIBITED_CLAIM_CLASSES.map((claimClass) => claimClass.classId).sort(),
+    );
+  });
+
+  it.each(PROHIBITED_CLAIM_CLASSES.map((claimClass) => [claimClass.classId, claimClass] as const))(
+    'prints exactly the "%s" terms under that class’s own heading',
+    (_classId, claimClass) => {
+      const printed = quotedTermsOnLine(
+        KNOWN_PROMPT.system,
+        `- ${CLAIM_CLASS_PROSE_LABEL[claimClass.classId]}: `,
+      );
+      // Order and length both: a duplicated term or a dropped one fails here
+      // even when the set happens to survive.
+      expect(printed).toEqual([...claimClass.terms]);
+    },
+  );
+
+  it('prints exactly the Barnum vocabulary, in the gate’s order', () => {
+    expect(barnumTermsOf(KNOWN_PROMPT.system)).toEqual([...BARNUM_PHRASES]);
+  });
+
+  it('keeps the general Barnum principle beside the list', () => {
+    // The closed list is a floor, not a definition. Human SELLABLE review stays
+    // the ceiling, and the model is told the list is not exhaustive.
+    expect(KNOWN_PROMPT.system).toContain('- Barnum-Sätze schreiben, die auf fast jeden Menschen zutreffen.');
+    expect(KNOWN_PROMPT.system).toContain('Diese Liste ist nur die Untergrenze:');
+  });
+
+  it('states that the ban covers every surface the gate reads', () => {
+    // `runProductSafetyGate` loops over prose AND every uncertainty note, and
+    // the matcher is lexical, so negation and everyday meaning are no escape.
+    expect(KNOWN_PROMPT.system).toContain('UND in "uncertaintyNotes", auch in einer Verneinung');
+  });
+
+  it('keeps the system message static: identical on both charts and digit-free', () => {
+    expect(UNKNOWN_PROMPT.system).toBe(KNOWN_PROMPT.system);
+    expect(/\d/.test(KNOWN_PROMPT.system)).toBe(false);
+  });
+
+  it('REFUSES the exact v2 shape: 13 of 72 and 0 of 23', () => {
+    // The pre-repair message, copied from the commit that shipped it. If this
+    // check could pass on it, every assertion above would be decorative.
+    expect(uncoveredIn(V2_SYSTEM_MESSAGE, ALL_PROHIBITED_TERMS)).toHaveLength(72 - 13);
+    expect(uncoveredIn(V2_SYSTEM_MESSAGE, BARNUM_PHRASES)).toHaveLength(23);
+    expect(() => barnumTermsOf(V2_SYSTEM_MESSAGE)).toThrow();
+    expect(() =>
+      quotedTermsOnLine(V2_SYSTEM_MESSAGE, `- ${CLAIM_CLASS_PROSE_LABEL.medical}: `),
+    ).toThrow();
+  });
+
+  it('positive control: a term the gate gains without propagation is reported', () => {
+    // Simulates a lexicon edit that the prompt did not pick up. The checker
+    // must name the new word — otherwise "uncovered = []" above would hold for
+    // any vocabulary at all.
+    const GAINED = 'zukunftsgarantie';
+    expect(uncoveredIn(wholeOf(KNOWN_PROMPT), [...ALL_PROHIBITED_TERMS, GAINED])).toEqual([GAINED]);
+  });
+
+  it('positive control: a term removed from the rendered text is reported', () => {
+    const REMOVED = 'burnout';
+    const edited = KNOWN_PROMPT.system.replace(`"${REMOVED}", `, '');
+    expect(edited).not.toBe(KNOWN_PROMPT.system);
+    expect(uncoveredIn(edited, ALL_PROHIBITED_TERMS)).toEqual([REMOVED]);
+    const medical = PROHIBITED_CLAIM_CLASSES.find((claimClass) => claimClass.classId === 'medical');
+    if (medical === undefined) throw new Error('the gate declares no medical class');
+    expect(quotedTermsOnLine(edited, `- ${CLAIM_CLASS_PROSE_LABEL.medical}: `)).not.toEqual([
+      ...medical.terms,
+    ]);
   });
 });

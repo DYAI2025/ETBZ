@@ -1143,7 +1143,10 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     const source = harnessSource();
     const caught = source.indexOf('structuralBlocker = error');
     const built = source.indexOf('const evidence = buildRunEvidence(');
-    const written = source.indexOf('writeFileSync(');
+    // Searched from `built` onwards: the provider-refusal branch earlier in the
+    // file writes its own record, and matching THAT write would let this
+    // ordering pass with the structural path's write deleted.
+    const written = source.indexOf('writeFileSync(', built);
     const rethrown = source.lastIndexOf('throw structuralBlocker;');
 
     // Ordering IS the property. Evidence has to be assembled and on disk before
@@ -1161,6 +1164,37 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     // blur them — the same rule the cost fields now follow.
     expect(source).toContain("semanticQaStatus: qa?.status ?? 'NOT_RUN'");
     expect(source).toContain("structuralGate: structuralBlocker === null ? 'PASS' : 'BLOCKED'");
+  });
+
+  it('files a PROVIDER refusal on disk before the refusal propagates', () => {
+    // The second refusal path, and the one a real run actually took: HTTP 200,
+    // no content, 700 seconds — and no file, because this branch only printed.
+    // The builder pins every gate NOT_RUN itself (see its own tests); what only
+    // the harness source can show is that the record is sanitized, cost-checked
+    // and WRITTEN before the error leaves.
+    const source = harnessSource();
+    const caught = source.indexOf('if (error instanceof NarrativeProviderError) {');
+    const built = source.indexOf('buildProviderRefusalEvidence({', caught);
+    const sanitized = source.indexOf('assertEvidenceSanitized(refusalEvidence', built);
+    const capped = source.indexOf('assertObservedCostWithinCap(refusalEvidence)', built);
+    const written = source.indexOf('refusalEvidence.canonicalJson', built);
+    const rethrown = source.indexOf('throw error;', written);
+
+    expect(caught).toBeGreaterThan(-1);
+    expect(built).toBeGreaterThan(caught);
+    expect(sanitized).toBeGreaterThan(built);
+    expect(capped).toBeGreaterThan(built);
+    expect(written).toBeGreaterThan(Math.max(sanitized, capped));
+    expect(rethrown).toBeGreaterThan(written);
+  });
+
+  it('asks for the reasoning effort it records, on both the accepted and the refused path', () => {
+    // A record that states one effort while the request carried another would
+    // be evidence of nothing. Both paths read the same constant the request does.
+    const source = harnessSource();
+    expect(source).toContain('reasoningEffort: LIVE_REASONING_EFFORT,');
+    expect(source).toContain('generateNarrativeFromPlan(chain.brief, plan, liveTransport, LIVE_OPTIONS)');
+    expect(source.split('requestedReasoningEffort: LIVE_REASONING_EFFORT,').length - 1).toBe(2);
   });
 });
 

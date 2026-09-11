@@ -149,7 +149,58 @@ export type NarrativeProviderErrorCode =
   | 'PROVIDER_OUTPUT_SCHEMA_INVALID';
 
 /**
- * The shape this module needs from a route attempt.
+ * WHY a transport attempt failed, as a closed, machine-readable set.
+ *
+ * The transport's own `LlmErrorCode` says which CLASS of failure happened, and
+ * that is what failover decides on. It is too coarse to diagnose with: most
+ * refusals share `LLM_CONTRACT_ERROR`, so a real run that ended "HTTP 200,
+ * LLM_CONTRACT_ERROR" could not say whether the stream had no body, carried no
+ * message content, reported an in-band error, or sent a corrupted frame. Those
+ * need different responses, and only the transport knows which one it saw.
+ *
+ * CLOSED ON PURPOSE. A detail is one of these names and nothing else — never a
+ * provider's error text, never an exception message. Free text is where raw
+ * provider output and credentials leak into evidence, and a set that anyone
+ * could extend with a string would stop being evidence of anything.
+ *
+ * Declared here, in the module that depends on nothing, so the adapter that
+ * raises a detail and the evidence record that files it read the same list.
+ */
+export const PROVIDER_FAILURE_DETAIL_CODES = [
+  /** The request did not receive response headers before the route deadline. */
+  'REQUEST_TIMEOUT',
+  /** The connection failed before any response existed. */
+  'NETWORK_FAILURE',
+  /** The route answered with a status other than 200. */
+  'HTTP_STATUS_NOT_OK',
+  /** A buffered 200 whose body is not JSON. */
+  'BUFFERED_BODY_NOT_JSON',
+  /** A buffered 200 whose JSON is not an object. */
+  'BUFFERED_BODY_NOT_OBJECT',
+  /** A buffered 200 with no `choices`. */
+  'BUFFERED_NO_CHOICES',
+  /** A buffered 200 whose first choice carries no message content. */
+  'BUFFERED_EMPTY_MESSAGE',
+  /** A streamed 200 with no response body at all. */
+  'STREAM_NO_BODY',
+  /** A complete `data:` line that claims a chunk and is not one. */
+  'MALFORMED_SSE_CHUNK',
+  /** The stream closed on an unterminated `data:` line. */
+  'STREAM_CLOSED_MID_FRAME',
+  /** The provider reported an error frame inside a 200 stream. */
+  'IN_BAND_PROVIDER_ERROR',
+  /** The route deadline fired while the body was still streaming. */
+  'STREAM_TIMEOUT',
+  /** The stream broke part-way for a reason other than the deadline. */
+  'STREAM_INTERRUPTED',
+  /** The stream ended normally and carried no message content. */
+  'STREAM_NO_MESSAGE_CONTENT',
+] as const;
+
+export type ProviderFailureDetailCode = (typeof PROVIDER_FAILURE_DETAIL_CODES)[number];
+
+/**
+ * One attempt against one route, in the shape the evidence record files.
  *
  * Declared here for the same reason `NarrativeQaFindingLike` is: the error
  * module must keep depending on nothing. Importing the adapter's own type would
@@ -157,27 +208,54 @@ export type NarrativeProviderErrorCode =
  * importing the evidence module's type would close a cycle through
  * `semantic-qa`. TypeScript's structural typing makes both real shapes satisfy
  * this one.
+ *
+ * It is the FULL attempt, not a narrow echo. A refusal's ledger is the only
+ * record that run will ever have, so the refusal evidence is built from exactly
+ * these fields — and a field the error does not carry is a field that evidence
+ * would have to invent.
  */
 export interface NarrativeRouteAttemptLike {
   readonly order: number;
   readonly routeId: string;
-  readonly outcome: string;
+  readonly model: string;
+  readonly outcome: 'accepted' | 'transient_failure' | 'terminal_failure' | 'content_rejected';
   readonly errorCode: string | null;
+  /** Which closed transport failure this was. `null` when none happened. */
+  readonly failureDetailCode: ProviderFailureDetailCode | null;
+  readonly httpStatus: number | null;
   readonly failoverAuthorized: boolean;
+  readonly usage: {
+    readonly promptTokens: number | null;
+    readonly completionTokens: number | null;
+    readonly totalTokens: number | null;
+  } | null;
+  readonly responseId: string | null;
+  readonly responseHash: string | null;
+  readonly finishReason: string | null;
   /**
-   * What the provider reported this attempt cost, when the shape carries it.
-   *
-   * OPTIONAL because this interface is the narrow structural echo described
-   * above, and several fixtures build it directly. The real `RouteAttempt`
-   * always supplies it, so a live refusal carries the cost reports out of the
-   * run — which is the only way the cap can be checked on a path where no
-   * evidence record is ever built.
+   * What the provider reported this attempt cost. `null` when it reported
+   * nothing, which is not a zero. A refusal carries these out of the run, which
+   * is how the cap is checked on a path where no accepted answer exists.
    */
-  readonly reportedCost?: {
+  readonly reportedCost: {
     readonly amount: number;
     readonly currency: string | null;
     readonly source: string;
   } | null;
+}
+
+/**
+ * Which prompt a run was prepared to send, by identity rather than by text.
+ *
+ * Carried on a refusal so its evidence names the exact prompt and brief without
+ * rebuilding either after the fact — and without carrying the prompt text,
+ * which evidence has no use for.
+ */
+export interface NarrativePromptIdentity {
+  readonly briefStructuralHash: string;
+  readonly promptStructuralHash: string;
+  readonly promptVersion: string;
+  readonly policyVersion: string;
 }
 
 export class NarrativeProviderError extends Error {
@@ -192,14 +270,22 @@ export class NarrativeProviderError extends Error {
    * no evidence.
    */
   readonly attempts: readonly NarrativeRouteAttemptLike[];
+  /**
+   * The prompt the run was prepared to send. `null` only for a refusal raised
+   * outside the provider adapter — the draft parser, for one — which has no
+   * prompt of its own; the adapter re-raises those with the identity attached.
+   */
+  readonly prompt: NarrativePromptIdentity | null;
   constructor(
     code: NarrativeProviderErrorCode,
     message: string,
     attempts: readonly NarrativeRouteAttemptLike[] = [],
+    prompt: NarrativePromptIdentity | null = null,
   ) {
     super(message);
     this.name = 'NarrativeProviderError';
     this.code = code;
     this.attempts = attempts;
+    this.prompt = prompt;
   }
 }

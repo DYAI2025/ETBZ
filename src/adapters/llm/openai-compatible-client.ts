@@ -35,6 +35,7 @@
  */
 
 import type { LlmRouteConfig } from '../../app/configuration/llm-routes.js';
+import type { ProviderFailureDetailCode } from '../../application/interpretation/errors.js';
 
 export const CHAT_COMPLETIONS_PATH = '/chat/completions';
 
@@ -57,6 +58,22 @@ export type LlmErrorCode =
   | 'LLM_CONTRACT_ERROR';
 
 /**
+ * An explicit reasoning effort, for routes whose models reason before answering.
+ *
+ * ABSENT BY DEFAULT. A request that sets none carries no `reasoning_effort`
+ * field at all — byte-for-byte what every request carried before this option
+ * existed — so no route changes behaviour unless a caller asks for it.
+ *
+ * The three values are the closed set the approved free route's model documents.
+ * They are refused at runtime as well as by the type, because a value that
+ * arrives through a cast or a configuration string would otherwise be forwarded
+ * verbatim to a provider nobody has asked how it reads an unknown value.
+ */
+export const LLM_REASONING_EFFORTS = ['low', 'high', 'max'] as const;
+
+export type LlmReasoningEffort = (typeof LLM_REASONING_EFFORTS)[number];
+
+/**
  * Transient status codes, enumerated. Anything absent here is TERMINAL.
  *
  * The contract authorises failover for "network/connectivity failure, timeout,
@@ -68,25 +85,61 @@ export type LlmErrorCode =
  */
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([408, 429, 500, 502, 503, 504]);
 
+/**
+ * What a failed attempt had GENUINELY observed before it was refused.
+ *
+ * Structured, non-secret fields only — never answer text, never reasoning text,
+ * never a provider's error body. Each is `null` when it was not observed:
+ * `usage` is `null` when no usage block arrived, not a row of zeros.
+ *
+ * It exists because the refusal is the run's only record. A stream that ended
+ * with no content had usually reported a finish reason and token counts first,
+ * and dropping them left "HTTP 200, no content" as the whole story — when the
+ * finish reason and the token count are exactly what distinguish "the model
+ * spent its budget reasoning" from "the provider sent nothing".
+ */
+export interface LlmObservation {
+  readonly finishReason: string | null;
+  readonly usage: LlmUsage | null;
+  readonly reportedCost: ReportedCost | null;
+}
+
+/** The structured facts a refusal carries beside its class. */
+export interface LlmFailureDetail {
+  readonly detailCode: ProviderFailureDetailCode;
+  /** The HTTP status, when a response existed. */
+  readonly status?: number;
+  readonly observed?: LlmObservation;
+}
+
 export class LlmProviderError extends Error {
   readonly code: LlmErrorCode;
   readonly failureClass: LlmFailureClass;
   readonly routeId: string;
   readonly status: number | undefined;
+  /**
+   * WHICH closed failure shape this is. `code` alone cannot say: most refusals
+   * in this file share `LLM_CONTRACT_ERROR`.
+   */
+  readonly detailCode: ProviderFailureDetailCode;
+  /** What the attempt observed before it failed. `null` when nothing was. */
+  readonly observed: LlmObservation | null;
 
   constructor(
     code: LlmErrorCode,
     failureClass: LlmFailureClass,
     routeId: string,
     message: string,
-    status?: number,
+    detail: LlmFailureDetail,
   ) {
     super(message);
     this.name = 'LlmProviderError';
     this.code = code;
     this.failureClass = failureClass;
     this.routeId = routeId;
-    this.status = status;
+    this.status = detail.status;
+    this.detailCode = detail.detailCode;
+    this.observed = detail.observed ?? null;
   }
 }
 
@@ -146,6 +199,11 @@ export interface LlmChatRequest {
    * partial outputs is therefore untouched by this flag.
    */
   readonly stream: boolean;
+  /**
+   * Sent as `reasoning_effort` when set; not sent at all when absent. See
+   * `LlmReasoningEffort`.
+   */
+  readonly reasoningEffort?: LlmReasoningEffort;
 }
 
 export interface Transport {
@@ -322,6 +380,8 @@ function malformedChunk(
   route: LlmRouteConfig,
   position: LinePosition,
   payloadLength: number,
+  status: number,
+  observed: LlmObservation,
 ): LlmProviderError {
   if (position === 'residual') {
     return new LlmProviderError(
@@ -329,6 +389,7 @@ function malformedChunk(
       'transient',
       route.routeId,
       `route "${route.routeId}" closed mid-frame: the stream ended on an incomplete data line of ${String(payloadLength)} characters`,
+      { detailCode: 'STREAM_CLOSED_MID_FRAME', status, observed },
     );
   }
   return new LlmProviderError(
@@ -336,6 +397,7 @@ function malformedChunk(
     'terminal',
     route.routeId,
     `route "${route.routeId}" sent a data line of ${String(payloadLength)} characters that is not a JSON completion chunk`,
+    { detailCode: 'MALFORMED_SSE_CHUNK', status, observed },
   );
 }
 
@@ -374,7 +436,7 @@ async function readStreamedCompletion(
       'terminal',
       route.routeId,
       `route "${route.routeId}" answered a stream with no body`,
-      response.status,
+      { detailCode: 'STREAM_NO_BODY', status: response.status },
     );
   }
 
@@ -389,6 +451,16 @@ async function readStreamedCompletion(
   // Accumulated from the same chunk as the usage block, so the streamed and
   // buffered paths report the same observation for the same answer.
   let reportedCost: ReportedCost | null = null;
+  // Whether a usage block arrived at all. `usage` starts as a row of nulls, and
+  // a refusal must be able to say "no usage was reported" rather than file that
+  // row as if something had been.
+  let usageObserved = false;
+  // What a refusal raised from here may carry: observed structure, never text.
+  const observedSoFar = (): LlmObservation => ({
+    finishReason,
+    usage: usageObserved ? usage : null,
+    reportedCost,
+  });
 
   const consume = (line: string, position: LinePosition): void => {
     // Makes no claim to carry a chunk: comment, keep-alive, other field, blank.
@@ -407,7 +479,7 @@ async function readStreamedCompletion(
     try {
       parsed = JSON.parse(payload);
     } catch {
-      throw malformedChunk(route, position, payload.length);
+      throw malformedChunk(route, position, payload.length, response.status, observedSoFar());
     }
     // `null`, a bare number, a bare string AND AN ARRAY all survive
     // JSON.parse. A line that said `data:` and then delivered one of those is as
@@ -416,7 +488,7 @@ async function readStreamedCompletion(
     // saying out loud because `typeof [] === 'object'` and `[] !== null`, so the
     // obvious two-clause check lets it straight through.
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw malformedChunk(route, position, payload.length);
+      throw malformedChunk(route, position, payload.length, response.status, observedSoFar());
     }
     const chunk = parsed as StreamChunk;
     // AN IN-BAND ERROR FRAME ENDS THE RUN.
@@ -441,6 +513,7 @@ async function readStreamedCompletion(
         'terminal',
         route.routeId,
         `route "${route.routeId}" reported an error inside the stream after answering HTTP 200`,
+        { detailCode: 'IN_BAND_PROVIDER_ERROR', status: response.status, observed: observedSoFar() },
       );
     }
     if (responseId === null && typeof chunk.id === 'string') {
@@ -452,6 +525,7 @@ async function readStreamedCompletion(
     if (chunk.usage !== undefined && chunk.usage !== null) {
       usage = readUsage(chunk.usage);
       reportedCost = readReportedCost(chunk.usage);
+      usageObserved = true;
     }
     if (!Array.isArray(chunk.choices)) {
       return;
@@ -520,6 +594,7 @@ async function readStreamedCompletion(
         'transient',
         route.routeId,
         `route "${route.routeId}" stopped streaming before it finished answering, after ${String(route.timeoutMs)}ms`,
+        { detailCode: 'STREAM_TIMEOUT', status: response.status, observed: observedSoFar() },
       );
     }
     const reason = error instanceof Error ? error.message : 'unknown stream failure';
@@ -532,6 +607,7 @@ async function readStreamedCompletion(
       'transient',
       route.routeId,
       `route "${route.routeId}" stream failed: ${reason}`,
+      { detailCode: 'STREAM_INTERRUPTED', status: response.status, observed: observedSoFar() },
     );
   } finally {
     // Release the body on EVERY exit, including the refusals above.
@@ -555,7 +631,10 @@ async function readStreamedCompletion(
       'terminal',
       route.routeId,
       `route "${route.routeId}" streamed no message content`,
-      response.status,
+      // The observation is the diagnosis here. A reasoning model that spent its
+      // whole budget thinking ends exactly like this, and the finish reason and
+      // token counts it reported are what say so.
+      { detailCode: 'STREAM_NO_MESSAGE_CONTENT', status: response.status, observed: observedSoFar() },
     );
   }
 
@@ -595,6 +674,16 @@ export async function requestChatCompletion(
   if (request.jsonObjectMode) {
     payload['response_format'] = { type: 'json_object' };
   }
+  if (request.reasoningEffort !== undefined) {
+    // Refused before the deadline starts and before anything leaves the
+    // process. The value itself is not repeated: it did not pass validation.
+    if (!(LLM_REASONING_EFFORTS as readonly string[]).includes(request.reasoningEffort)) {
+      throw new TypeError(
+        `reasoning effort must be one of ${LLM_REASONING_EFFORTS.join(', ')}; no request was sent`,
+      );
+    }
+    payload['reasoning_effort'] = request.reasoningEffort;
+  }
   if (request.stream) {
     payload['stream'] = true;
     // Ask for the usage block on the final chunk. Providers that do not know
@@ -618,6 +707,15 @@ export async function requestChatCompletion(
     // deadline has to cover the thing that actually takes the time.
     clearTimeout(timer);
   }
+}
+
+/** What a buffered body reported before it was refused. Structure only. */
+function bufferedObservation(rawUsage: unknown, rawFinishReason: unknown): LlmObservation {
+  return {
+    finishReason: typeof rawFinishReason === 'string' ? rawFinishReason : null,
+    usage: rawUsage === undefined || rawUsage === null ? null : readUsage(rawUsage),
+    reportedCost: readReportedCost(rawUsage),
+  };
 }
 
 async function sendAndRead(
@@ -649,6 +747,7 @@ async function sendAndRead(
         'transient',
         route.routeId,
         `route "${route.routeId}" did not answer within ${String(route.timeoutMs)}ms`,
+        { detailCode: 'REQUEST_TIMEOUT' },
       );
     }
     const reason = error instanceof Error ? error.message : 'unknown network failure';
@@ -657,6 +756,7 @@ async function sendAndRead(
       'transient',
       route.routeId,
       `route "${route.routeId}" connection failed: ${reason}`,
+      { detailCode: 'NETWORK_FAILURE' },
     );
   }
 
@@ -667,7 +767,7 @@ async function sendAndRead(
       failureClass,
       route.routeId,
       `route "${route.routeId}" answered HTTP ${String(response.status)}`,
-      response.status,
+      { detailCode: 'HTTP_STATUS_NOT_OK', status: response.status },
     );
   }
 
@@ -684,7 +784,7 @@ async function sendAndRead(
       'terminal',
       route.routeId,
       `route "${route.routeId}" returned a body that is not valid JSON`,
-      response.status,
+      { detailCode: 'BUFFERED_BODY_NOT_JSON', status: response.status },
     );
   }
 
@@ -694,7 +794,7 @@ async function sendAndRead(
       'terminal',
       route.routeId,
       `route "${route.routeId}" returned a body that is not an object`,
-      response.status,
+      { detailCode: 'BUFFERED_BODY_NOT_OBJECT', status: response.status },
     );
   }
   const completion = raw as RawCompletion;
@@ -705,7 +805,11 @@ async function sendAndRead(
       'terminal',
       route.routeId,
       `route "${route.routeId}" returned no choices`,
-      response.status,
+      {
+        detailCode: 'BUFFERED_NO_CHOICES',
+        status: response.status,
+        observed: bufferedObservation(completion.usage, undefined),
+      },
     );
   }
   const [first] = choices as readonly RawChoice[];
@@ -719,7 +823,11 @@ async function sendAndRead(
       'terminal',
       route.routeId,
       `route "${route.routeId}" returned an empty message content`,
-      response.status,
+      {
+        detailCode: 'BUFFERED_EMPTY_MESSAGE',
+        status: response.status,
+        observed: bufferedObservation(completion.usage, first?.finish_reason),
+      },
     );
   }
 

@@ -19,6 +19,11 @@
  * provider. The correct response to a blocked run is to improve the versioned
  * prompt and produce a NEW candidate, not to soften a gate.
  *
+ * A PROVIDER REFUSAL — no answer accepted at all — writes a record too. It is
+ * built by `buildProviderRefusalEvidence`, bound to the same candidate SHA,
+ * brief hash and prompt identity, with both gates `NOT_RUN` and the reading
+ * `NOT_PRODUCED`. It used to reach only the console.
+ *
  * The credential is read from the process environment, which the operator
  * supplies. It is never written to any artefact: `assertEvidenceSanitized` is
  * called on the record before it is persisted, with the actual key values, so
@@ -30,13 +35,18 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildLlmRoutePlan } from '../../src/app/configuration/llm-routes.js';
 import { NarrativeProviderError, ReportError } from '../../src/application/interpretation/errors.js';
-import { generateNarrativeFromPlan } from '../../src/adapters/llm/llm-narrative-provider.js';
+import {
+  DEFAULT_LLM_NARRATIVE_OPTIONS,
+  generateNarrativeFromPlan,
+} from '../../src/adapters/llm/llm-narrative-provider.js';
+import type { LlmNarrativeOptions } from '../../src/adapters/llm/llm-narrative-provider.js';
+import type { LlmReasoningEffort } from '../../src/adapters/llm/openai-compatible-client.js';
 import { buildGoldenReading, renderGoldenReadingText } from '../../src/application/interpretation/golden-reading.js';
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
 import {
   assertEvidenceSanitized,
-  assertNoReportedCharge,
   assertObservedCostWithinCap,
+  buildProviderRefusalEvidence,
   buildRunEvidence,
   observedBillableCostEurFrom,
 } from '../../src/application/interpretation/narrative-evidence.js';
@@ -68,6 +78,30 @@ const liveTransport = {
     return fetch(url, init);
   },
 };
+
+/**
+ * THE ONE RUNTIME VARIABLE THIS CANDIDATE CHANGES for the controlled live run.
+ *
+ * The approved free route's model documents `max` as its default reasoning
+ * effort when a request names none, and the previous live run on it (candidate
+ * 54d7e30, no reasoning effort sent) ended after roughly 700 seconds with
+ * HTTP 200 and no message content. This harness therefore asks for `low`.
+ *
+ * Set HERE and nowhere in the product defaults: `DEFAULT_LLM_NARRATIVE_OPTIONS`
+ * still sends no `reasoning_effort`. It is committed rather than read from the
+ * environment so the candidate SHA alone reproduces the request, and it is
+ * filed in every record as `requestedReasoningEffort` — what was asked for, not
+ * a measurement of how the provider reasoned.
+ */
+const LIVE_REASONING_EFFORT: LlmReasoningEffort = 'low';
+
+const LIVE_OPTIONS: LlmNarrativeOptions = {
+  ...DEFAULT_LLM_NARRATIVE_OPTIONS,
+  reasoningEffort: LIVE_REASONING_EFFORT,
+};
+
+const OBSERVED_COST_BASIS =
+  'The approved cap of 0.00 EUR is POLICY and is recorded as approvedCostCapEur. What appears as observedBillableCostEur is an OBSERVATION and is null unless a route actually reported a per-call cost: the free marker in a model id is an eligibility guard ETBZ applies before calling, never a billing readback, and no approved route exposes a billing API to read one from.';
 
 interface LiveOutcome {
   readonly evidence: NarrativeRunEvidence;
@@ -104,28 +138,57 @@ async function runOnce(
 
   let result;
   try {
-    result = await generateNarrativeFromPlan(chain.brief, plan, liveTransport);
+    result = await generateNarrativeFromPlan(chain.brief, plan, liveTransport, LIVE_OPTIONS);
   } catch (error) {
     // A refused run is a real outcome of this slice and must leave evidence.
     // The attempt ledger travels on the error precisely so that the failing
     // case is not the one case with nothing to review.
+    //
+    // ON DISK, not only on the console. The ledger used to be printed and then
+    // lost: a real run that ended HTTP 200 with no content after 700 seconds
+    // left no file at all. It is now filed as a full record — every gate
+    // NOT_RUN, the reading NOT_PRODUCED — before the refusal propagates.
     if (error instanceof NarrativeProviderError) {
+      const refusalEvidence = buildProviderRefusalEvidence({
+        candidateSha,
+        briefStructuralHash: chain.brief.structuralHash,
+        qaVersion: NARRATIVE_QA_VERSION,
+        routeVerdicts,
+        requestedReasoningEffort: LIVE_REASONING_EFFORT,
+        observedCostBasis: OBSERVED_COST_BASIS,
+        refusal: error,
+      });
+      assertEvidenceSanitized(refusalEvidence, secretValues(), [
+        model.displayName,
+        model.birth.date,
+      ]);
+      // A REFUSED RUN CAN STILL HAVE BEEN CHARGED FOR. A route that answered and
+      // was then rejected still did the work it bills for — a truncated reading
+      // and unparseable output are both refusals that arrive AFTER the provider
+      // has generated tokens. The record-level guard now covers this path,
+      // because this path now has a record.
+      assertObservedCostWithinCap(refusalEvidence);
+
+      mkdirSync(OUT_DIR, { recursive: true });
+      writeFileSync(
+        resolve(OUT_DIR, `etbz-25b-${label}-evidence.json`),
+        refusalEvidence.canonicalJson,
+        'utf8',
+      );
+
       console.log(`\n===== ETBZ-25B LIVE RUN (${label}) — PROVIDER REFUSED =====`);
-      console.log(`code     : ${error.code}`);
-      console.log(`message  : ${error.message}`);
-      console.log(`attempts : ${JSON.stringify(error.attempts, null, 1)}`);
+      console.log(`candidate SHA : ${candidateSha}`);
+      console.log(`brief hash    : ${chain.brief.structuralHash}`);
+      console.log(`reasoning     : ${LIVE_REASONING_EFFORT} (requested, not measured)`);
+      console.log(`code          : ${error.code}`);
+      console.log(`message       : ${error.message}`);
+      console.log(`attempts      : ${JSON.stringify(error.attempts, null, 1)}`);
       console.log(
-        `verdicts : ${routeVerdicts
+        `verdicts      : ${routeVerdicts
           .map((v) => `${v.routeId}=${v.eligible ? 'eligible' : (v.ineligibleReason ?? 'ineligible')}`)
           .join(', ')}`,
       );
-      // A REFUSED RUN CAN STILL HAVE BEEN CHARGED FOR, and this is the only
-      // place that can notice it. No evidence record exists on this path, so the
-      // record-level cap check further down is unreachable here — yet a route
-      // that answered and was then rejected still did the work it bills for. A
-      // truncated reading and unparseable output are both refusals that arrive
-      // AFTER the provider has generated tokens.
-      assertNoReportedCharge(error.attempts);
+      console.log(`evidence hash : ${refusalEvidence.structuralHash}`);
     }
     throw error;
   }
@@ -181,12 +244,13 @@ async function runOnce(
     goldenReadingStatus:
       reading === null ? 'BLOCKED' : 'CANDIDATE_READY_FOR_HUMAN_REVIEW',
     goldenReadingHash: reading?.structuralHash ?? null,
+    requestedReasoningEffort: LIVE_REASONING_EFFORT,
+    providerRefusalCode: null,
     // DERIVED FROM WHAT THE PROVIDER ACTUALLY REPORTED, not from the cap. On
     // every approved route except OpenRouter this is null, because the route
     // returns no cost field at all - and null is the truthful record of that.
     observedBillableCostEur: observedBillableCostEurFrom(result.attempts),
-    observedCostBasis:
-      'The approved cap of 0.00 EUR is POLICY and is recorded as approvedCostCapEur. What appears as observedBillableCostEur is an OBSERVATION and is null unless a route actually reported a per-call cost: the free marker in a model id is an eligibility guard ETBZ applies before calling, never a billing readback, and no approved route exposes a billing API to read one from.',
+    observedCostBasis: OBSERVED_COST_BASIS,
   });
 
   // Refuse to persist anything that carries a credential or a personal datum.
@@ -210,6 +274,7 @@ async function runOnce(
   console.log(`candidate SHA : ${candidateSha}`);
   console.log(`brief hash    : ${chain.brief.structuralHash}`);
   console.log(`prompt        : ${result.prompt.promptVersion} / ${result.prompt.promptStructuralHash}`);
+  console.log(`reasoning     : ${LIVE_REASONING_EFFORT} (requested, not measured)`);
   console.log(`route         : ${result.acceptedRouteId} (${result.acceptedModel})`);
   console.log(`attempts      : ${JSON.stringify(result.attempts, null, 1)}`);
   console.log(`report hash   : ${report?.structuralHash ?? '(no report - structural gate blocked)'}`);

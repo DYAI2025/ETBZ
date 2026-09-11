@@ -56,6 +56,10 @@ import { structuralHashOfCanonicalText } from '../../domain/structural-hash.js';
 import { isNoChargeModelId } from '../../app/configuration/llm-routes.js';
 import type { LlmRouteConfig, LlmRoutePlan } from '../../app/configuration/llm-routes.js';
 import { NarrativeProviderError } from '../../application/interpretation/errors.js';
+import type {
+  NarrativePromptIdentity,
+  ProviderFailureDetailCode,
+} from '../../application/interpretation/errors.js';
 import {
   parseNarrativeDraft,
   toProviderOutput,
@@ -68,7 +72,12 @@ import {
   LlmProviderError,
   requestChatCompletion,
 } from './openai-compatible-client.js';
-import type { LlmUsage, ReportedCost, Transport } from './openai-compatible-client.js';
+import type {
+  LlmReasoningEffort,
+  LlmUsage,
+  ReportedCost,
+  Transport,
+} from './openai-compatible-client.js';
 
 /** The provider id recorded in the report's provenance, per route. */
 export function providerIdFor(route: LlmRouteConfig): string {
@@ -99,6 +108,12 @@ export interface RouteAttempt {
   readonly model: string;
   readonly outcome: RouteAttemptOutcome;
   readonly errorCode: string | null;
+  /**
+   * WHICH closed transport failure this was, when the transport refused the
+   * attempt. `null` on an accepted attempt and on a content refusal, whose
+   * `errorCode` is already specific.
+   */
+  readonly failureDetailCode: ProviderFailureDetailCode | null;
   readonly httpStatus: number | null;
   /** Whether the contract authorises moving to the next route after this. */
   readonly failoverAuthorized: boolean;
@@ -140,6 +155,14 @@ export interface LlmNarrativeOptions {
   readonly temperature: number;
   /** See `LlmChatRequest.stream`: a transport decision, not a product one. */
   readonly stream: boolean;
+  /**
+   * An explicit reasoning effort, passed through to the request only when set.
+   *
+   * Deliberately ABSENT from `DEFAULT_LLM_NARRATIVE_OPTIONS`: the default run
+   * sends no `reasoning_effort`, exactly as before this option existed. A caller
+   * that wants one says so, and its evidence records what it asked for.
+   */
+  readonly reasoningEffort?: LlmReasoningEffort;
 }
 
 export const DEFAULT_LLM_NARRATIVE_OPTIONS: LlmNarrativeOptions = {
@@ -168,25 +191,38 @@ export function isIncompleteFinishReason(finishReason: string | null): boolean {
 function failedAttempt(
   route: LlmRouteConfig,
   outcome: RouteAttemptOutcome,
-  errorCode: string,
-  httpStatus: number | null,
+  error: LlmProviderError,
   failoverAuthorized: boolean,
 ): RouteAttempt {
+  // Only what the transport genuinely OBSERVED before refusing: a finish reason,
+  // a usage block, a cost report. Each stays `null` when it was not observed —
+  // writing 0 would be inventing a measurement for a call that never completed.
+  const observed = error.observed;
   return {
     order: route.order,
     routeId: route.routeId,
     model: route.model,
     outcome,
-    errorCode,
-    httpStatus,
+    errorCode: error.code,
+    failureDetailCode: error.detailCode,
+    httpStatus: error.status ?? null,
     failoverAuthorized,
-    usage: null,
+    usage: observed?.usage ?? null,
     responseId: null,
+    // No answer was accepted, so there is nothing to bind a hash to.
     responseHash: null,
-    finishReason: null,
-    // No response existed, so nothing was reported. Writing 0 here would be
-    // inventing a measurement for a call that never completed.
-    reportedCost: null,
+    finishReason: observed?.finishReason ?? null,
+    reportedCost: observed?.reportedCost ?? null,
+  };
+}
+
+/** The prompt's identity, without its text. Travels on every refusal. */
+function promptIdentityOf(prompt: NarrativePrompt): NarrativePromptIdentity {
+  return {
+    briefStructuralHash: prompt.briefStructuralHash,
+    promptStructuralHash: prompt.promptStructuralHash,
+    promptVersion: prompt.promptVersion,
+    policyVersion: prompt.policyVersion,
   };
 }
 
@@ -203,6 +239,16 @@ export async function generateNarrativeFromPlan(
   transport: Transport,
   options: LlmNarrativeOptions = DEFAULT_LLM_NARRATIVE_OPTIONS,
 ): Promise<LlmNarrativeResult> {
+  // RULE 1. Built once, outside the loop, from one brief. Every route below
+  // receives this exact object; nothing in the loop can rebuild it.
+  //
+  // Built BEFORE the eligibility refusal too, so that every refusal this
+  // function raises carries the identity of the prompt the run was prepared to
+  // send — and a run refused before its first request still leaves evidence
+  // naming its brief and prompt. The attempt ledger shows nothing was sent.
+  const prompt = buildNarrativePrompt(brief);
+  const identity = promptIdentityOf(prompt);
+
   if (plan.routes.length === 0) {
     throw new NarrativeProviderError(
       'PROVIDER_NO_ELIGIBLE_ROUTE',
@@ -213,12 +259,10 @@ export async function generateNarrativeFromPlan(
         )
         .join(', ')}`,
       [],
+      identity,
     );
   }
 
-  // RULE 1. Built once, outside the loop, from one brief. Every route below
-  // receives this exact object; nothing in the loop can rebuild it.
-  const prompt = buildNarrativePrompt(brief);
   const attempts: RouteAttempt[] = [];
 
   for (const route of plan.routes) {
@@ -232,6 +276,7 @@ export async function generateNarrativeFromPlan(
         'PROVIDER_NO_ELIGIBLE_ROUTE',
         `route "${route.routeId}" reached the call with model "${route.model}", which carries no zero-price marker; the 0.00 EUR cap refuses it`,
         attempts,
+        identity,
       );
     }
 
@@ -246,6 +291,10 @@ export async function generateNarrativeFromPlan(
           temperature: options.temperature,
           jsonObjectMode: true,
           stream: options.stream,
+          // Absent unless the caller asked: the default request is unchanged.
+          ...(options.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: options.reasoningEffort }),
         },
         transport,
       );
@@ -253,13 +302,7 @@ export async function generateNarrativeFromPlan(
       if (error instanceof LlmProviderError) {
         const transient = error.failureClass === 'transient';
         attempts.push(
-          failedAttempt(
-            route,
-            transient ? 'transient_failure' : 'terminal_failure',
-            error.code,
-            error.status ?? null,
-            transient,
-          ),
+          failedAttempt(route, transient ? 'transient_failure' : 'terminal_failure', error, transient),
         );
         if (transient) {
           // RULE 4: nothing from this attempt is retained. The next route
@@ -268,8 +311,9 @@ export async function generateNarrativeFromPlan(
         }
         throw new NarrativeProviderError(
           'PROVIDER_TERMINAL_FAILURE',
-          `route "${route.routeId}" failed terminally (${error.code}); failover is not authorised for this failure class`,
+          `route "${route.routeId}" failed terminally (${error.code}/${error.detailCode}); failover is not authorised for this failure class`,
           attempts,
+          identity,
         );
       }
       throw error;
@@ -290,6 +334,7 @@ export async function generateNarrativeFromPlan(
         model: completion.model,
         outcome: 'content_rejected',
         errorCode: 'PROVIDER_OUTPUT_TRUNCATED',
+        failureDetailCode: null,
         httpStatus: 200,
         failoverAuthorized: false,
         usage: completion.usage,
@@ -302,6 +347,7 @@ export async function generateNarrativeFromPlan(
         'PROVIDER_OUTPUT_SCHEMA_INVALID',
         `route "${route.routeId}" stopped at the token limit; a truncated reading is refused and is never continued on another provider`,
         attempts,
+        identity,
       );
     }
 
@@ -321,6 +367,7 @@ export async function generateNarrativeFromPlan(
         model: completion.model,
         outcome: 'content_rejected',
         errorCode: error instanceof NarrativeProviderError ? error.code : 'PROVIDER_OUTPUT_NOT_JSON',
+        failureDetailCode: null,
         httpStatus: 200,
         failoverAuthorized: false,
         usage: completion.usage,
@@ -333,7 +380,7 @@ export async function generateNarrativeFromPlan(
         // Re-raised carrying the attempt ledger. The parser that threw the
         // original has no idea a route history exists, and a refusal is exactly
         // the run whose history a reviewer needs.
-        throw new NarrativeProviderError(error.code, error.message, attempts);
+        throw new NarrativeProviderError(error.code, error.message, attempts, identity);
       }
       throw error;
     }
@@ -344,6 +391,7 @@ export async function generateNarrativeFromPlan(
       model: completion.model,
       outcome: 'accepted',
       errorCode: null,
+      failureDetailCode: null,
       httpStatus: 200,
       failoverAuthorized: false,
       usage: completion.usage,
@@ -368,5 +416,6 @@ export async function generateNarrativeFromPlan(
       .map((attempt) => `${attempt.routeId}=${attempt.errorCode ?? 'unknown'}`)
       .join(', ')}`,
     attempts,
+    identity,
   );
 }

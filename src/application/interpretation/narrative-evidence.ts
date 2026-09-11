@@ -64,6 +64,11 @@
 
 import { canonicalJson } from '../../domain/canonical-json.js';
 import { structuralHashOfCanonicalText } from '../../domain/structural-hash.js';
+import type {
+  NarrativePromptIdentity,
+  NarrativeProviderErrorCode,
+  ProviderFailureDetailCode,
+} from './errors.js';
 import type { NarrativeQaFinding } from './semantic-qa.js';
 
 export const RUN_EVIDENCE_VERSION = 'etbz-25b.run-evidence.v1' as const;
@@ -97,12 +102,20 @@ export interface EvidenceReportedCost {
   readonly source: string;
 }
 
+/**
+ * The reasoning effort a run asked for, mirrored from the adapter's
+ * `LlmReasoningEffort` for the same layering reason as `EvidenceUsage`.
+ */
+export type EvidenceReasoningEffort = 'low' | 'high' | 'max';
+
 export interface EvidenceRouteAttempt {
   readonly order: number;
   readonly routeId: string;
   readonly model: string;
   readonly outcome: 'accepted' | 'transient_failure' | 'terminal_failure' | 'content_rejected';
   readonly errorCode: string | null;
+  /** A member of the closed transport-failure set, or `null`. Never free text. */
+  readonly failureDetailCode: ProviderFailureDetailCode | null;
   readonly httpStatus: number | null;
   readonly failoverAuthorized: boolean;
   readonly usage: EvidenceUsage | null;
@@ -147,6 +160,18 @@ export interface NarrativeRunEvidence {
   readonly semanticQaFindings: readonly NarrativeQaFinding[];
   readonly goldenReadingStatus: 'CANDIDATE_READY_FOR_HUMAN_REVIEW' | 'BLOCKED' | 'NOT_PRODUCED';
   readonly goldenReadingHash: string | null;
+  /**
+   * The reasoning effort the run ASKED for, or `null` when it sent none.
+   *
+   * A request parameter, not a measurement: it says what was sent, and nothing
+   * about how much the provider actually reasoned.
+   */
+  readonly requestedReasoningEffort: EvidenceReasoningEffort | null;
+  /**
+   * The provider refusal that ended the run before any output was accepted, or
+   * `null` when a provider output was accepted.
+   */
+  readonly providerRefusalCode: NarrativeProviderErrorCode | null;
   /**
    * OBSERVATION: the cost providers actually reported, in EUR.
    *
@@ -396,6 +421,107 @@ export type BuildRunEvidenceInput = Omit<
   NarrativeRunEvidence,
   'evidenceVersion' | 'approvedCostCapEur' | 'allowPaid' | 'canonicalJson' | 'structuralHash'
 >;
+
+/**
+ * The refusal a provider-refusal record is built from.
+ *
+ * `NarrativeProviderError` satisfies this structurally; the evidence module
+ * names the shape rather than the class so it keeps its one-way dependency.
+ */
+export interface ProviderRefusalLike {
+  readonly code: NarrativeProviderErrorCode;
+  readonly attempts: readonly EvidenceRouteAttempt[];
+  readonly prompt: NarrativePromptIdentity | null;
+}
+
+/**
+ * What the caller supplies for a refusal record — and, by omission, what it
+ * cannot.
+ *
+ * There is no gate field, no report hash, no reading hash and no accepted route
+ * in this type. A refused run executed none of those, so the builder writes
+ * each as not-run / not-produced itself, and a caller cannot hand it a `PASS`.
+ */
+export interface BuildProviderRefusalEvidenceInput {
+  readonly candidateSha: string;
+  readonly briefStructuralHash: string;
+  readonly qaVersion: string;
+  readonly routeVerdicts: readonly EvidenceRouteVerdict[];
+  readonly requestedReasoningEffort: EvidenceReasoningEffort | null;
+  readonly observedCostBasis: string;
+  readonly refusal: ProviderRefusalLike;
+}
+
+export class RefusalEvidenceNotBindableError extends Error {
+  readonly code: 'REFUSAL_EVIDENCE_NOT_BINDABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'RefusalEvidenceNotBindableError';
+    this.code = 'REFUSAL_EVIDENCE_NOT_BINDABLE';
+  }
+}
+
+/**
+ * The evidence record of a run that a provider REFUSED.
+ *
+ * Before this existed, a refusal left only a console print: the attempt ledger
+ * travelled out on the error and no record was ever filed, so the run that most
+ * needed reviewing — measured: HTTP 200, no content, 700 seconds — was the one
+ * with nothing on disk. This builds the same `NarrativeRunEvidence` a completed
+ * run gets, bound to the same candidate SHA, brief hash and prompt identity.
+ *
+ * NOTHING THAT DID NOT RUN IS REPORTED AS HAVING RUN. The structural gate and
+ * the semantic QA are `NOT_RUN`, the reading is `NOT_PRODUCED`, and every hash
+ * of an artefact that does not exist is `null`. The observations — finish
+ * reason, usage, reported cost — are exactly what the attempts carry, and the
+ * observed cost is derived from them by the same function a completed run uses.
+ *
+ * Refuses to build a record it cannot bind: a refusal that carries no prompt
+ * identity, one whose prompt answered a different brief, or one whose ledger
+ * claims an accepted attempt, which a refusal cannot have.
+ */
+export function buildProviderRefusalEvidence(
+  input: BuildProviderRefusalEvidenceInput,
+): NarrativeRunEvidence {
+  const { refusal } = input;
+  if (refusal.prompt === null) {
+    throw new RefusalEvidenceNotBindableError(
+      `the ${refusal.code} refusal carries no prompt identity, so its evidence cannot name the prompt it was prepared to send`,
+    );
+  }
+  if (refusal.prompt.briefStructuralHash !== input.briefStructuralHash) {
+    throw new RefusalEvidenceNotBindableError(
+      'the refusal was raised for a different brief than the one this record would be bound to',
+    );
+  }
+  if (refusal.attempts.some((attempt) => attempt.outcome === 'accepted')) {
+    throw new RefusalEvidenceNotBindableError(
+      'a refusal ledger cannot contain an accepted attempt; a run with an accepted answer is not a provider refusal',
+    );
+  }
+  return buildRunEvidence({
+    candidateSha: input.candidateSha,
+    briefStructuralHash: input.briefStructuralHash,
+    promptStructuralHash: refusal.prompt.promptStructuralHash,
+    promptVersion: refusal.prompt.promptVersion,
+    policyVersion: refusal.prompt.policyVersion,
+    qaVersion: input.qaVersion,
+    routeVerdicts: input.routeVerdicts,
+    attempts: refusal.attempts,
+    acceptedRouteId: null,
+    acceptedModel: null,
+    reportStructuralHash: null,
+    structuralGate: 'NOT_RUN',
+    semanticQaStatus: 'NOT_RUN',
+    semanticQaFindings: [],
+    goldenReadingStatus: 'NOT_PRODUCED',
+    goldenReadingHash: null,
+    requestedReasoningEffort: input.requestedReasoningEffort,
+    providerRefusalCode: refusal.code,
+    observedBillableCostEur: observedBillableCostEurFrom(refusal.attempts),
+    observedCostBasis: input.observedCostBasis,
+  });
+}
 
 /** Assembles the record and anchors it with its own canonical text. */
 export function buildRunEvidence(input: BuildRunEvidenceInput): NarrativeRunEvidence {

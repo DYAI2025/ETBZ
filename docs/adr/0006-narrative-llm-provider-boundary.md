@@ -123,6 +123,39 @@ catches the forms of claim it lists and not the infinite paraphrase around them,
 and it cannot decide whether a sentence is true about a person. That is why the
 slice still ends at a human `SELLABLE | NOT_SELLABLE` review.
 
+### 9. A provider refusal files evidence, and names its failure from a closed set
+
+A run a provider refuses — no answer accepted at all — is filed through
+`buildProviderRefusalEvidence` as the same `NarrativeRunEvidence` a completed
+run gets: bound to the candidate SHA, the brief hash and the identity of the
+prompt the run was prepared to send, with both gates `NOT_RUN`, the reading
+`NOT_PRODUCED`, and `providerRefusalCode` naming the refusal. The builder takes
+no gate field from its caller, so a refused run cannot be filed as a pass.
+
+Each transport refusal names one member of `PROVIDER_FAILURE_DETAIL_CODES` — a
+closed set, never free text — and keeps the finish reason, usage and reported
+cost it had genuinely observed before refusing; each stays `null` when it was
+not observed. Answer text, reasoning text and provider error bodies are never
+kept.
+
+The measured reason: candidate `54d7e30`'s one live run ended HTTP 200 /
+`LLM_CONTRACT_ERROR` / no content after roughly 700 seconds and left no file,
+while the finish reason and token counts that would have diagnosed it had
+already been discarded, and most transport refusals shared that one code.
+
+### 10. Reasoning effort is an optional, generic request field, absent by default
+
+`LlmChatRequest.reasoningEffort` (`low | high | max`, closed by type and at
+runtime) is sent as `reasoning_effort` only when set. Unset, the request is
+byte-for-byte what it was before the field existed, and
+`DEFAULT_LLM_NARRATIVE_OPTIONS` sets none. There is no provider subclass and no
+model id in code: the field belongs to the one generic adapter.
+
+The live harness sets `low` explicitly for the controlled ETBZ-25B run — the
+approved free route's model documents `max` as its default when none is sent —
+and files it as `requestedReasoningEffort`: what was asked for, not a
+measurement of how the provider reasoned.
+
 ## Consequences
 
 - The live harness (`tests/live/`, `npm run golden-reading`) is excluded from the

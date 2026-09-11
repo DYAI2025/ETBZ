@@ -170,6 +170,8 @@ const BASE_INPUT: BuildRunEvidenceInput = {
   semanticQaFindings: QA.findings,
   goldenReadingStatus: READING === null ? 'BLOCKED' : 'CANDIDATE_READY_FOR_HUMAN_REVIEW',
   goldenReadingHash: READING?.structuralHash ?? null,
+  requestedReasoningEffort: null,
+  providerRefusalCode: null,
   observedBillableCostEur: null,
   observedCostBasis:
     'Not observed: none of the approved routes returned a per-call cost field for this run, so no monetary cost was measured. The 0.00 EUR figure recorded beside it is the APPROVED CAP, which is policy, not a reading.',

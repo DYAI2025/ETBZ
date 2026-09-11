@@ -289,19 +289,51 @@ async function readStreamedCompletion(
     }
   };
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  // The read loop needs the SAME failure classification the request did.
+  //
+  // Without this, the deadline firing mid-body threw a raw `AbortError` out of
+  // `reader.read()` — past the classification, past the attempt ledger, past
+  // failover — so a slow provider surfaced as an unclassified crash instead of
+  // as a transient `LLM_TIMEOUT` attempt. Measured on a real run: the abort
+  // fired correctly at the route deadline and the run still ended with no
+  // usable evidence, because the error never became one of ours. With a streamed
+  // answer the body is where nearly all the time is spent, so this is the more
+  // likely place to time out, not the less.
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffered += decoder.decode(value, { stream: true });
+      const lines = buffered.split('\n');
+      // The final element is whatever arrived after the last newline: an
+      // incomplete line that must wait for the next chunk rather than be parsed.
+      buffered = lines.pop() ?? '';
+      for (const line of lines) {
+        consume(line);
+      }
     }
-    buffered += decoder.decode(value, { stream: true });
-    const lines = buffered.split('\n');
-    // The final element is whatever arrived after the last newline: an
-    // incomplete line that must wait for the next chunk rather than be parsed.
-    buffered = lines.pop() ?? '';
-    for (const line of lines) {
-      consume(line);
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new LlmProviderError(
+        'LLM_TIMEOUT',
+        'transient',
+        route.routeId,
+        `route "${route.routeId}" stopped streaming before it finished answering, after ${String(route.timeoutMs)}ms`,
+      );
     }
+    const reason = error instanceof Error ? error.message : 'unknown stream failure';
+    // A stream that breaks part-way is an AVAILABILITY failure, so failover is
+    // authorised — and nothing partial is retained: `content` is discarded with
+    // this throw, which is what keeps rule 4 (no continuation, no blending)
+    // true even when a route dies halfway through a reading.
+    throw new LlmProviderError(
+      'LLM_NETWORK_ERROR',
+      'transient',
+      route.routeId,
+      `route "${route.routeId}" stream failed: ${reason}`,
+    );
   }
   consume(buffered);
 

@@ -334,8 +334,75 @@ describe('ETBZ-25B hardening H7: the deadline covers the BODY, not just the head
       },
     };
 
-    await expect(requestChatCompletion(route, request, transport)).rejects.toThrow();
+    const error: unknown = await requestChatCompletion(route, request, transport).catch(
+      (caught: unknown) => caught,
+    );
+
+    // NOT merely "it threw". An earlier version of this assertion checked only
+    // that something was thrown, and it stayed green while the abort escaped as
+    // a raw AbortError from inside the stream reader — past the classification,
+    // past the attempt ledger, past failover. A slow provider then surfaced as
+    // an unclassified crash with no evidence. The TYPE is the property: a
+    // deadline must become a transient LLM_TIMEOUT belonging to this route, or
+    // nothing downstream can act on it.
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect(error).toMatchObject({
+      code: 'LLM_TIMEOUT',
+      failureClass: 'transient',
+      routeId: 'tokenrouter',
+    });
+    expect((error as Error).message).not.toContain(route.apiKey);
   }, 10_000);
+
+  it('classifies a stream that breaks part-way as transient, and keeps nothing partial', async () => {
+    // The other way a stream ends early. Failover is authorised because the
+    // route became unavailable mid-answer — and the partial text is discarded
+    // with the attempt, which is what keeps "no continuation, no blending" true
+    // even when a route dies halfway through a reading.
+    const route = {
+      routeId: 'tokenrouter' as const,
+      order: 1,
+      baseUrl: 'https://provider.invalid/v1',
+      model: 'vendor/model-free',
+      apiKey: 'fixture-key',
+      noChargeBasis: 'provider_free_model_tier' as const,
+      timeoutMs: 30_000,
+    };
+    const transport: Transport = {
+      fetch(): Promise<Response> {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"choices":[{"delta":{"content":"{\\"sections\\":["}}]}\n\n',
+              ),
+            );
+            controller.error(new Error('connection reset by peer'));
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      },
+    };
+
+    const error: unknown = await requestChatCompletion(
+      route,
+      {
+        system: 's',
+        user: 'u',
+        maxTokens: 16,
+        temperature: 0,
+        jsonObjectMode: true,
+        stream: true,
+      },
+      transport,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(LlmProviderError);
+    expect(error).toMatchObject({ code: 'LLM_NETWORK_ERROR', failureClass: 'transient' });
+    // The half-written reading is not on the error, and therefore cannot reach
+    // a report, a retry or another provider.
+    expect(JSON.stringify(error)).not.toContain('sections');
+  });
 
   it('still clears the deadline on a completed call, leaving no dangling timer', async () => {
     // The positive control for the same change: moving the clear later must not

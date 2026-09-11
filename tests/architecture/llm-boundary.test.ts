@@ -1061,6 +1061,7 @@ describe('ETBZ-25B: the LLM slice modules sit where the architecture says', () =
     'src/app/configuration/llm-routes.ts',
     'src/application/interpretation/semantic-qa.ts',
     'src/application/interpretation/semantic-qa-lexicon.ts',
+    'src/application/interpretation/narrative-qa-policy.ts',
     'src/application/interpretation/narrative-evidence.ts',
     'src/application/interpretation/golden-reading.ts',
     'src/application/interpretation/prompt-policy.ts',
@@ -1160,5 +1161,49 @@ describe('ETBZ-25B: a blocked live run still leaves a reviewable record', () => 
     // blur them — the same rule the cost fields now follow.
     expect(source).toContain("semanticQaStatus: qa?.status ?? 'NOT_RUN'");
     expect(source).toContain("structuralGate: structuralBlocker === null ? 'PASS' : 'BLOCKED'");
+  });
+});
+
+describe('ETBZ-25B: the prompt and the QA gate read one policy, and neither reads the other', () => {
+  // The prompt has to ANNOUNCE the floors the gate judges, so two modules read
+  // the same five numbers. v1 let each keep its own copy and they drifted: R7
+  // asked for one chart term per paragraph while the gate blocked anything
+  // under two, and the report-wide floor of four was stated nowhere at all.
+  //
+  // The fix is a shared policy module, not an import from the prompt into the
+  // gate or back. This test is what keeps it that way: either direction would
+  // work today and would make the prompt builder depend on `report-model.ts`
+  // and the error types for the sake of five numbers.
+  const POLICY = 'src/application/interpretation/narrative-qa-policy.ts';
+  const PROMPT = 'src/application/interpretation/prompt-policy.ts';
+  const QA = 'src/application/interpretation/semantic-qa.ts';
+
+  function importsOf(path: string): readonly string[] {
+    // The same parser every other rule in this file uses: a specifier written
+    // across several lines sits outside any single-line text pattern.
+    return collectModuleSpecifiers(parseFile(resolve(REPO_ROOT, path)));
+  }
+
+  it('the policy module imports nothing at all', () => {
+    // What makes it safe for both sides to import. A policy that reached for
+    // the lexicon or the report model would drag that graph into the prompt.
+    expect(importsOf(POLICY)).toEqual([]);
+  });
+
+  it('both readers import the policy module', () => {
+    expect(importsOf(PROMPT)).toContain('./narrative-qa-policy.js');
+    expect(importsOf(QA)).toContain('./narrative-qa-policy.js');
+  });
+
+  it('the prompt does not import the QA gate, and the gate does not import the prompt', () => {
+    expect(importsOf(PROMPT)).not.toContain('./semantic-qa.js');
+    expect(importsOf(QA)).not.toContain('./prompt-policy.js');
+  });
+
+  it('guard self-check: the extractor really sees this file’s imports', () => {
+    // Every assertion above is an absence except one; an extractor returning []
+    // for everything would satisfy all of them.
+    expect(importsOf(PROMPT)).toContain('./semantic-qa-lexicon.js');
+    expect(importsOf(QA)).toContain('./report-model.js');
   });
 });

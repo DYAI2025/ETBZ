@@ -27,9 +27,11 @@ import {
   buildLlmRoutePlan,
   isAcceptableBaseUrl,
 } from '../../src/app/configuration/llm-routes.js';
+import { ReportError } from '../../src/application/interpretation/errors.js';
 import { buildNarrativeChain } from '../../src/application/interpretation/narrative-brief.js';
 import { buildReportModel } from '../../src/application/interpretation/report-model.js';
 import type { ReportModel } from '../../src/application/interpretation/report-model.js';
+import { CERTAINTY_TERMS } from '../../src/application/interpretation/semantic-qa-lexicon.js';
 import { runSemanticNarrativeQa } from '../../src/application/interpretation/semantic-qa.js';
 import type { HoroscopeModel } from '../../src/application/horoscope-model.js';
 import { knownTimeModel, unknownTimeModel } from '../support/narrativeFixture.js';
@@ -470,5 +472,128 @@ describe('ETBZ-25B hardening H8: a non-200 is never mistaken for a stream failur
 
     expect(error).toBeInstanceOf(LlmProviderError);
     expect(error).toMatchObject({ code: 'LLM_RATE_LIMITED', failureClass: 'transient' });
+  });
+});
+
+describe('ETBZ-25B hardening H9: every certainty word the prompt names is actually refused', () => {
+  // THE DIVERGENCE, not a bypass this time but its mirror image: the prompt
+  // named six of the twenty-five words `CERTAINTY_TERMS` refuses, so nineteen
+  // of them were refusals a provider could not have avoided by reading the
+  // instructions. v2 renders the list from the constant, which closes the gap
+  // in one direction only — the prompt now states every word the gate HOLDS.
+  // These cases close the other direction: every word the prompt states is a
+  // word the gate actually blocks, on BOTH surfaces it reads.
+  //
+  // Four of the twenty-five were already proven behaviourally in
+  // `narrative-semantic-qa.negative.test.ts`. A vocabulary the prompt publishes
+  // in full deserves a proof in full: without it, a term could be deleted from
+  // the gate's loop and the prompt would go on announcing it.
+
+  it.each([...CERTAINTY_TERMS])('refuses "%s" in the prose of a provisional section', (term) => {
+    const codes = codesFor('unknown', (answer) => {
+      const section = sectionOf(answer, POSITIONAL);
+      section.prose = `${section.prose} Diese Lesart gilt ${term} als Beobachtung.`;
+    });
+
+    expect(codes).toContain('QA_PROVISIONAL_CERTAINTY');
+  });
+
+  it.each([...CERTAINTY_TERMS])('refuses "%s" in the note of a provisional section', (term) => {
+    const codes = codesFor('unknown', (answer) => {
+      const section = sectionOf(answer, POSITIONAL);
+      const [note] = section.uncertaintyNotes;
+      if (note === undefined) throw new Error('fixture defect: the section carries no note');
+      section.uncertaintyNotes = [`${note} Die Deutung gilt ${term} als Beobachtung.`];
+    });
+
+    expect(codes).toContain('QA_PROVISIONAL_CERTAINTY');
+  });
+
+  it('positive control: the same sentence without a certainty word passes', () => {
+    // The carrier sentence is what every case above adds; if it were refused on
+    // its own, the twenty-five results would say nothing about the words.
+    const codes = codesFor('unknown', (answer) => {
+      const section = sectionOf(answer, POSITIONAL);
+      section.prose = `${section.prose} Diese Lesart gilt als Beobachtung.`;
+    });
+
+    expect(codes).toEqual([]);
+  });
+
+  it('positive control: certainty is allowed where nothing is provisional', () => {
+    // The gate is about provisionality, not about the words as such. A section
+    // that cites no provisional fact may write them, and the known-time chart
+    // has none — so this refuses nothing, which is the correct behaviour and
+    // the reason the cases above run on the unknown-time chart.
+    const codes = codesFor('known', (answer) => {
+      const section = sectionOf(answer, SELF_ROLE);
+      section.prose = `${section.prose} Das ist zweifellos ein Muster.`;
+    });
+
+    expect(codes).not.toContain('QA_PROVISIONAL_CERTAINTY');
+  });
+});
+
+describe('ETBZ-25B hardening H10: a CONSTRUCTED factId is refused, never repaired', () => {
+  // THE DEFECT, copied from the run that produced it rather than invented to
+  // fit the fix. A real route returned well-formed German citing
+  // `chart.pillar.year.tenGod`. That id does not exist in this chart — but
+  // `chart.pillar.year.stem` does, and so does `chart.natal.pillar.year.tenGod`,
+  // and the model had taken the prefix of the first and the leaf of the second.
+  //
+  // The value it carried was the REAL value of the real fact, which is what
+  // makes this the tempting case: a "helpful" resolver could match the id to
+  // the fact it obviously meant. Doing so would let the provider's guess decide
+  // which chart fact a sentence is about, which is the one thing Fact Integrity
+  // exists to prevent. The gate refuses, and the whole report goes with it.
+
+  const FABRICATED = 'chart.pillar.year.tenGod';
+  const REAL = 'chart.natal.pillar.year.tenGod';
+
+  function selfRoleCiting(factId: string): FixtureAnswer {
+    const answer = validKnownTimeAnswer();
+    const section = sectionOf(answer, SELF_ROLE);
+    const cited = section.citedFacts.find((candidate) => candidate.factId === REAL);
+    if (cited === undefined) throw new Error(`fixture defect: no section cites "${REAL}"`);
+    section.citedFacts = section.citedFacts.map((candidate) =>
+      candidate.factId === REAL ? { ...candidate, factId } : candidate,
+    );
+    return answer;
+  }
+
+  it('the chart really carries the fact the fabricated id resembles', () => {
+    const ids = buildNarrativeChain(knownTimeModel()).brief.facts.map((fact) => fact.id);
+    expect(ids).toContain(REAL);
+    expect(ids).toContain('chart.pillar.year.stem');
+    expect(ids).not.toContain(FABRICATED);
+  });
+
+  it('refuses the report outright', () => {
+    expect(() => reportOf('known', selfRoleCiting(FABRICATED))).toThrowError(
+      expect.objectContaining({ code: 'REPORT_UNKNOWN_FACT' }),
+    );
+  });
+
+  it('does not map the invented id onto the real fact it resembles', () => {
+    // Stated as a behaviour rather than as an absence of code: a future
+    // "fuzzy id" convenience would make the assertion above pass by resolving
+    // the id, and only this one would notice.
+    const outcome = ((): string => {
+      try {
+        return `BUILT:${reportOf('known', selfRoleCiting(FABRICATED)).structuralHash}`;
+      } catch (error) {
+        return `REFUSED:${error instanceof ReportError ? error.code : 'UNEXPECTED_ERROR_TYPE'}`;
+      }
+    })();
+
+    expect(outcome).toBe('REFUSED:REPORT_UNKNOWN_FACT');
+  });
+
+  it('positive control: the same answer with the real id is accepted', () => {
+    // The mutation is one character sequence in one factId. Without this, the
+    // refusal above could be about anything else in the answer.
+    const report = reportOf('known', selfRoleCiting(REAL));
+    expect(report.interpretation.map((section) => section.themeId)).toContain(SELF_ROLE);
+    expect(runSemanticNarrativeQa(report).status).toBe('PASS');
   });
 });

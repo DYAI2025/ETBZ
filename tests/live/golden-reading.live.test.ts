@@ -76,12 +76,12 @@ async function runOnce(
   const candidateSha = process.env['ETBZ_CANDIDATE_SHA'] ?? 'UNKNOWN_CANDIDATE_SHA';
   // An explicit route deadline, chosen from measurement rather than from the
   // library default: the approved free route produced a complete reading in
-  // roughly eight minutes once and needed more than fifteen on a later run, so
-  // twenty-five is the measured headroom. It must stay comfortably BELOW the
-  // runner's own timeout in `vitest.live.config.ts`, so a slow provider surfaces
-  // as an `LLM_TIMEOUT` attempt record — evidence — rather than as a runner
-  // timeout, which is not information about the reading.
-  const plan = buildLlmRoutePlan(process.env, 1_500_000);
+  // roughly eight minutes at one time of day and, measured again hours later on
+  // the same prompt, was about four times slower on a trivial call. Forty-five
+  // minutes is that measured degradation with headroom. It must stay comfortably
+  // BELOW the runner timeout in `vitest.live.config.ts`, so a slow provider
+  // surfaces as an `LLM_TIMEOUT` attempt record — evidence — and not as a runner
+  const plan = buildLlmRoutePlan(process.env, 2_700_000);
 
   const routeVerdicts = plan.eligibility.map((entry) => ({
     routeId: entry.routeId,

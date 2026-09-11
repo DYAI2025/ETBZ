@@ -37,8 +37,8 @@ export default defineConfig({
     // both at ten minutes, a run reported "Test timed out" and left the request
     // in flight for hours. The runner must be the outer bound, never the
     // deciding one.
-    testTimeout: 2_400_000,
-    hookTimeout: 2_400_000,
+    testTimeout: 4_200_000,
+    hookTimeout: 4_200_000,
     reporters: ['default'],
   },
 });

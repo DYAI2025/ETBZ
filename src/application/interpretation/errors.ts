@@ -75,3 +75,117 @@ export class ReportError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * ETBZ-25B — codes raised by the SEMANTIC Narrative QA.
+ *
+ * The structural codes above prove attachment; these prove the two things
+ * `report-model.ts` explicitly states it cannot see (role and tone of
+ * certainty), plus the three product-quality gates the Product Owner requires
+ * before a reading may be offered for a sellability judgement.
+ *
+ * Every one of them is a REFUSAL of a Golden Reading candidate. None of them is
+ * a reason to call a different provider: a semantic failure is a failure of the
+ * answer, and shopping for a more convenient answer is exactly what this gate
+ * exists to prevent.
+ */
+export type NarrativeQaErrorCode =
+  /** A cited symbol is given a linguistic role its fact kind does not carry. */
+  | 'QA_FACT_ROLE_MISMATCH'
+  /** Prose asserts certainty in a section that rests on a provisional fact. */
+  | 'QA_PROVISIONAL_CERTAINTY'
+  /** The uncertainty note exists but states no uncertainty. */
+  | 'QA_PROVISIONAL_NOTE_WITHOUT_UNCERTAINTY'
+  /** A section's prose names none of the facts it cites: unbound generic text. */
+  | 'QA_UNANCHORED_PROSE'
+  /** The report as a whole names too few distinct chart terms in its prose. */
+  | 'QA_INSUFFICIENT_CHART_DEPENDENCE'
+  /** A canonical Barnum statement: true of nearly everyone, about no one. */
+  | 'QA_BARNUM_PHRASE'
+  /** No section relates several chart signals: lookup paragraphs only. */
+  | 'QA_SYNTHESIS_INSUFFICIENT'
+  /** A deterministic-fate, medical, legal or financial claim. */
+  | 'QA_PROHIBITED_CLAIM';
+
+export class NarrativeQaError extends Error {
+  readonly code: 'NARRATIVE_QA_BLOCKED';
+  /** Every blocking finding, not merely the first. */
+  readonly findings: readonly NarrativeQaFindingLike[];
+  constructor(findings: readonly NarrativeQaFindingLike[]) {
+    super(
+      `semantic Narrative QA blocked the candidate with ${String(findings.length)} finding(s): ${findings
+        .map((finding) => finding.code)
+        .join(', ')}`,
+    );
+    this.name = 'NarrativeQaError';
+    this.code = 'NARRATIVE_QA_BLOCKED';
+    this.findings = findings;
+  }
+}
+
+/**
+ * The shape `NarrativeQaError` needs from a finding.
+ *
+ * Declared here rather than imported from `semantic-qa.ts` so the error module
+ * keeps depending on nothing: the QA module imports its codes from here, and a
+ * cycle back would make the dependency direction a matter of module-loading
+ * order rather than of design.
+ */
+export interface NarrativeQaFindingLike {
+  readonly code: NarrativeQaErrorCode;
+}
+
+/** Codes raised while obtaining an answer from a REAL external provider. */
+export type NarrativeProviderErrorCode =
+  /** No approved route survived the no-charge eligibility check. */
+  | 'PROVIDER_NO_ELIGIBLE_ROUTE'
+  /** Every eligible route failed with a transient availability failure. */
+  | 'PROVIDER_ALL_ROUTES_EXHAUSTED'
+  /** A route failed terminally; failover is not authorised for this class. */
+  | 'PROVIDER_TERMINAL_FAILURE'
+  /** The provider's text is not the JSON object the prompt requires. */
+  | 'PROVIDER_OUTPUT_NOT_JSON'
+  /** The provider's JSON does not satisfy the narrative draft schema. */
+  | 'PROVIDER_OUTPUT_SCHEMA_INVALID';
+
+/**
+ * The shape this module needs from a route attempt.
+ *
+ * Declared here for the same reason `NarrativeQaFindingLike` is: the error
+ * module must keep depending on nothing. Importing the adapter's own type would
+ * make `errors -> adapters` an edge the architecture guard forbids, and
+ * importing the evidence module's type would close a cycle through
+ * `semantic-qa`. TypeScript's structural typing makes both real shapes satisfy
+ * this one.
+ */
+export interface NarrativeRouteAttemptLike {
+  readonly order: number;
+  readonly routeId: string;
+  readonly outcome: string;
+  readonly errorCode: string | null;
+  readonly failoverAuthorized: boolean;
+}
+
+export class NarrativeProviderError extends Error {
+  readonly code: NarrativeProviderErrorCode;
+  /**
+   * Every attempt made before the run ended, including the one that failed.
+   *
+   * Carried ON THE ERROR because the contract requires "attempt order and
+   * eligible fallback reason" in the evidence of a run — and a run that ends in
+   * a refusal is exactly the run whose attempt history a reviewer needs. An
+   * error that discarded it would leave the failing case as the only one with
+   * no evidence.
+   */
+  readonly attempts: readonly NarrativeRouteAttemptLike[];
+  constructor(
+    code: NarrativeProviderErrorCode,
+    message: string,
+    attempts: readonly NarrativeRouteAttemptLike[] = [],
+  ) {
+    super(message);
+    this.name = 'NarrativeProviderError';
+    this.code = code;
+    this.attempts = attempts;
+  }
+}

@@ -54,10 +54,21 @@ import {
  * decomposition or a capital letter.
  */
 export function normalizeForMatch(text: string): string {
-  return text
-    .normalize('NFC')
-    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/gu, '')
-    .toLowerCase();
+  return (
+    text
+      .normalize('NFC')
+      .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/gu, '')
+      // ETBZ-25B: every run of whitespace collapses to one space, which is the
+      // same normalization `findOutOfScopeMethod` in `report-model.ts` has always
+      // applied to method vocabulary. Without it, a MULTI-WORD term is defeated
+      // by any whitespace variation a writer or a model produces for free \u2014 a
+      // line break, a non-breaking space, a double space \u2014 and the terms most
+      // worth catching are multi-word ones ("mit sicherheit", "dein schicksal",
+      // "ungenutztes potenzial"). Two guards normalizing differently is the same
+      // class of blind spot as not normalizing at all.
+      .replace(/\s+/gu, ' ')
+      .toLowerCase()
+  );
 }
 
 export interface ChartSymbolLexicon {
@@ -119,6 +130,59 @@ export function findUncitedNumerals(
 
 function escapeForRegExp(term: string): string {
   return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Half-open character range of one match inside an already-normalized text. */
+export interface TermSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * ETBZ-25B — every occurrence of `term` inside an ALREADY-NORMALIZED text.
+ *
+ * Exported from this module rather than re-implemented beside the semantic QA
+ * on purpose: normalization and boundary semantics have exactly one owner here,
+ * so a term cannot be invisible to one guard while the other sees it. Callers
+ * pass text that has been through `normalizeForMatch`; passing raw text would
+ * compare a folded needle against an unfolded haystack and silently find
+ * nothing.
+ *
+ * Han terms are matched as substrings because CJK has no word boundaries — the
+ * same asymmetry `findUncitedSymbols` already relies on.
+ */
+export function findTermSpans(normalizedText: string, normalizedTerm: string): TermSpan[] {
+  if (normalizedTerm.length === 0) {
+    return [];
+  }
+  const spans: TermSpan[] = [];
+  if (/\p{Script=Han}/u.test(normalizedTerm)) {
+    let from = 0;
+    for (;;) {
+      const index = normalizedText.indexOf(normalizedTerm, from);
+      if (index === -1) {
+        break;
+      }
+      spans.push({ start: index, end: index + normalizedTerm.length });
+      from = index + normalizedTerm.length;
+    }
+    return spans;
+  }
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}])${escapeForRegExp(normalizedTerm)}(?![\\p{L}\\p{N}])`,
+    'gu',
+  );
+  for (const match of normalizedText.matchAll(pattern)) {
+    if (match.index !== undefined) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  return spans;
+}
+
+/** True when `term` occurs at least once in the already-normalized text. */
+export function containsTerm(normalizedText: string, normalizedTerm: string): boolean {
+  return findTermSpans(normalizedText, normalizedTerm).length > 0;
 }
 
 /**

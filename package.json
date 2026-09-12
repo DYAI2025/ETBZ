@@ -24,7 +24,8 @@
     "secret-scan": "bash scripts/secret-scan.sh",
     "deps:scan": "npm audit --audit-level=high --omit=dev",
     "build-dry-run": "bash scripts/build-dry-run.sh",
-    "verify": "bash scripts/ci-verify.sh"
+    "verify": "bash scripts/ci-verify.sh",
+    "golden-reading": "vitest run --config vitest.live.config.ts"
   },
   "dependencies": {
     "express": "^5.1.0",

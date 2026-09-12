@@ -64,6 +64,7 @@ const SECRET_VARIABLES = [
   'GEMINI_API_KEY',
   'OPENCODE_API_KEY',
   'OPENROUTER_API_KEY',
+  'ZAI_API_KEY',
 ] as const;
 
 function secretValues(): readonly string[] {

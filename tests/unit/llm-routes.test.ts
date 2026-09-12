@@ -5,9 +5,12 @@ import {
   APPROVED_LLM_ROUTES,
   DEFAULT_LLM_TIMEOUT_MS,
   LlmPaidPathError,
+  ZAI_FREE_MODEL_ALLOWLIST,
   assertNoPaidPathAuthorized,
   buildLlmRoutePlan,
+  isModelInFreeAllowlist,
   isNoChargeModelId,
+  isNoChargeRouteModel,
 } from '../../src/app/configuration/llm-routes.js';
 import type {
   ApprovedRouteDefinition,
@@ -52,12 +55,13 @@ import { FIXTURE_LLM_ENV } from '../support/llmNarrativeFixture.js';
  * exactly one variable, so a red assertion names one cause.
  */
 
-/** The four approved routes in the Product Owner's declared preference order. */
+/** The five approved routes in the Product Owner's declared preference order. */
 const PREFERENCE_ORDER: readonly LlmRouteId[] = [
   'tokenrouter',
   'gemini',
   'opencode',
   'openrouter',
+  'zai',
 ];
 
 /**
@@ -125,6 +129,7 @@ function environmentWithout(variable: string): EnvironmentRecord {
 
 const TOKENROUTER = definitionFor('tokenrouter');
 const GEMINI = definitionFor('gemini');
+const ZAI = definitionFor('zai');
 
 /** Every credential the fixture environment configures, read from the declarations. */
 const CONFIGURED_API_KEYS: readonly string[] = APPROVED_LLM_ROUTES.map((definition) =>
@@ -179,12 +184,25 @@ describe('ETBZ-25B: the no-charge marker is anchored at the END of the model id'
 });
 
 describe('ETBZ-25B: APPROVED_LLM_ROUTES is reviewable product truth', () => {
-  it('declares exactly four approved routes', () => {
-    expect(APPROVED_LLM_ROUTES).toHaveLength(4);
+  it('declares exactly five approved routes', () => {
+    expect(APPROVED_LLM_ROUTES).toHaveLength(5);
   });
 
-  it('assigns the orders 1, 2, 3, 4 with no gap, duplicate or renumbering', () => {
-    expect(APPROVED_LLM_ROUTES.map((definition) => definition.order)).toEqual([1, 2, 3, 4]);
+  it('assigns the orders 1 to 5 with no gap, duplicate or renumbering', () => {
+    expect(APPROVED_LLM_ROUTES.map((definition) => definition.order)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('appends the newest route last and leaves the historical order untouched', () => {
+    // Adding a route must not silently re-rank the four that were approved
+    // first: that is a separate product decision. The new route takes the next
+    // free order, and the first four keep the numbers they had.
+    expect(APPROVED_LLM_ROUTES.slice(0, 4).map((definition) => definition.routeId)).toEqual([
+      'tokenrouter',
+      'gemini',
+      'opencode',
+      'openrouter',
+    ]);
+    expect(definitionFor('zai').order).toBe(5);
   });
 
   it('names each route once, in the Product Owner preference order', () => {
@@ -201,15 +219,43 @@ describe('ETBZ-25B: APPROVED_LLM_ROUTES is reviewable product truth', () => {
       definition.modelVariable,
       definition.apiKeyVariable,
     ]);
-    expect(variables).toHaveLength(12);
-    expect(new Set(variables).size).toBe(12);
+    expect(variables).toHaveLength(15);
+    expect(new Set(variables).size).toBe(15);
   });
 
   it('states a checkable no-charge basis and a published reason for each route', () => {
     for (const definition of APPROVED_LLM_ROUTES) {
-      expect(definition.noChargeBasis, definition.routeId).toBe('provider_free_model_tier');
+      expect(
+        ['provider_free_model_tier', 'provider_exact_free_model_allowlist'],
+        definition.routeId,
+      ).toContain(definition.noChargeBasis);
       expect(definition.statement.length, definition.routeId).toBeGreaterThan(0);
     }
+  });
+
+  it('gives an allowlist-based route a non-empty allowlist, and a marker-based route none', () => {
+    // The two bases are not interchangeable decorations. An allowlist route with
+    // no list admits nothing (see `isNoChargeRouteModel`), so an empty one would
+    // be a silently dead route; a marker route with a list would be carrying a
+    // rule that nothing reads.
+    for (const definition of APPROVED_LLM_ROUTES) {
+      if (definition.noChargeBasis === 'provider_exact_free_model_allowlist') {
+        expect(definition.freeModelAllowlist, definition.routeId).toBeDefined();
+        expect((definition.freeModelAllowlist ?? []).length, definition.routeId).toBeGreaterThan(0);
+      } else {
+        expect(definition.freeModelAllowlist, definition.routeId).toBeUndefined();
+      }
+    }
+  });
+
+  it('uses the allowlist basis for exactly one route, and names its two reviewed ids', () => {
+    const allowlisted = APPROVED_LLM_ROUTES.filter(
+      (definition) => definition.noChargeBasis === 'provider_exact_free_model_allowlist',
+    );
+
+    expect(allowlisted.map((definition) => definition.routeId)).toEqual(['zai']);
+    expect(ZAI_FREE_MODEL_ALLOWLIST).toEqual(['glm-4.7-flash', 'glm-4.5-flash']);
+    expect(ZAI.freeModelAllowlist).toBe(ZAI_FREE_MODEL_ALLOWLIST);
   });
 });
 
@@ -250,7 +296,7 @@ describe('ETBZ-25B: the plan over a fully configured environment', () => {
   it('lists every approved route in eligibility, so a skip is visible not absent', () => {
     expect(plan.eligibility.map((entry) => entry.routeId)).toEqual(PREFERENCE_ORDER);
     expect(plan.eligibility).toHaveLength(APPROVED_LLM_ROUTES.length);
-    expect(plan.eligibility.map((entry) => entry.order)).toEqual([1, 2, 3, 4]);
+    expect(plan.eligibility.map((entry) => entry.order)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it('keeps routes and eligibility in agreement', () => {
@@ -275,7 +321,7 @@ describe('ETBZ-25B: the plan over a fully configured environment', () => {
 
   it('places no configured credential value anywhere in the eligibility record', () => {
     const serializedEligibility = JSON.stringify(plan.eligibility);
-    expect(CONFIGURED_API_KEYS).toHaveLength(4);
+    expect(CONFIGURED_API_KEYS).toHaveLength(5);
     for (const apiKey of CONFIGURED_API_KEYS) {
       expect(serializedEligibility.includes(apiKey), apiKey).toBe(false);
     }
@@ -435,7 +481,7 @@ describe('ETBZ-25B: a route missing configuration is skipped, never guessed', ()
     expect(Object.hasOwn(entry, 'apiKey')).toBe(false);
   });
 
-  it('still lists all four routes when the environment configures none of them', () => {
+  it('still lists all five routes when the environment configures none of them', () => {
     const plan = buildLlmRoutePlan({});
     expect(plan.routes).toEqual([]);
     expect(plan.eligibility.map((entry) => entry.routeId)).toEqual(PREFERENCE_ORDER);
@@ -508,7 +554,16 @@ describe('ETBZ-25B: the plan carries the 0.00 EUR cap as a constant, not a setti
     const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
     expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
-    expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v1');
+    expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v2');
+  });
+
+  it('moved the plan version when the eligibility MECHANISM changed, not just the list', () => {
+    // v1 meant "eligible == the model id ends in a free marker". v2 means the
+    // verdict came from one of two rules, and the refusal vocabulary grew. A
+    // reader of an old record must be able to tell which rule produced it.
+    const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
+    expect(plan.planVersion).not.toBe('etbz-25b.llm-route-plan.v1');
+    expect(new Set(APPROVED_LLM_ROUTES.map((definition) => definition.noChargeBasis)).size).toBe(2);
   });
 
   it('keeps the cap when no route is eligible at all', () => {
@@ -519,11 +574,15 @@ describe('ETBZ-25B: the plan carries the 0.00 EUR cap as a constant, not a setti
 
   it('keeps the cap when every route is eligible', () => {
     // Positive control from the other extreme: the cap is not an artefact of a
-    // partially configured environment.
+    // partially configured environment. Both deliberately-refused routes are
+    // admitted here, each through its OWN rule.
     const plan = buildLlmRoutePlan(
-      environmentWith({ [GEMINI.modelVariable]: 'vendor-model-b:free' }),
+      environmentWith({
+        [GEMINI.modelVariable]: 'vendor-model-b:free',
+        [ZAI.modelVariable]: 'glm-4.7-flash',
+      }),
     );
-    expect(plan.routes).toHaveLength(4);
+    expect(plan.routes).toHaveLength(5);
     expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
   });
@@ -614,5 +673,242 @@ describe('ETBZ-25B: no environment variable can authorize a paid path', () => {
     expect(() => {
       assertNoPaidPathAuthorized(environmentWithout('LLM_ALLOW_PAID'));
     }).not.toThrow();
+  });
+});
+
+/**
+ * The direct Z.ai route: the second no-charge basis, and why it is narrow.
+ *
+ * This provider publishes a price of Free for ids that carry NO marker, whose
+ * shape is indistinguishable from the paid models beside them on the same price
+ * table. The marker rule cannot decide them, and the tempting repair — treating
+ * `-flash` as a free marker — would have authorised `glm-4.7-flashx`, a PAID
+ * model one character away from a free one.
+ *
+ * So the tests below sweep the boundary from BOTH sides, the same discipline the
+ * marker block at the top of this file applies: the two reviewed ids must pass,
+ * and every near-miss that a prefix, suffix or substring rule would have let
+ * through must fail. The fixture environment configures this route with
+ * `glm-4.7-flashx` on purpose, so the default state of the whole suite is the
+ * trap being refused.
+ */
+describe('ETBZ-25B: the Z.ai route is decided by an EXACT free-model allowlist', () => {
+  it('is absent from the plan as missing_configuration when nothing configures it', () => {
+    // The first thing to establish: a route nobody configured is skipped and
+    // REPORTED, never assumed free and never silently absent.
+    const plan = buildLlmRoutePlan({ LLM_ALLOW_PAID: 'false', LLM_PAID_COST_CAP_USD: '0' });
+    const entry = eligibilityFor(plan, 'zai');
+
+    expect(entry.eligible).toBe(false);
+    expect(entry.ineligibleReason).toBe('missing_configuration');
+    expect(entry.baseUrl).toBeNull();
+    expect(entry.model).toBeNull();
+    expect(plan.routes.map((route) => route.routeId)).not.toContain('zai');
+  });
+
+  it.each([
+    ['the primary reviewed id', 'glm-4.7-flash'],
+    ['the backup reviewed id', 'glm-4.5-flash'],
+  ])('admits %s, and reports the allowlist basis with it', (_label, model) => {
+    const plan = buildLlmRoutePlan(environmentWith({ [ZAI.modelVariable]: model }));
+    const entry = eligibilityFor(plan, 'zai');
+
+    expect(entry.eligible).toBe(true);
+    expect(entry.ineligibleReason).toBeNull();
+    expect(entry.model).toBe(model);
+    expect(entry.noChargeBasis).toBe('provider_exact_free_model_allowlist');
+    expect(routeFor(plan, 'zai').model).toBe(model);
+    expect(routeFor(plan, 'zai').order).toBe(5);
+  });
+
+  it.each([
+    ['the paid base model', 'glm-4.7'],
+    ['the paid FlashX variant, one character away from free', 'glm-4.7-flashx'],
+    ['the other paid base model', 'glm-4.5'],
+    ['a paid Air variant', 'glm-4.5-air'],
+    ['a paid AirX variant', 'glm-4.5-airx'],
+    ['an arbitrary model merely ending in -flash', 'foo-flash'],
+    ['a newer flash model nobody reviewed', 'glm-5.3-flash'],
+    ['a free id with something appended', 'glm-4.7-flash-turbo'],
+    ['a free id with a vendor prefix, as another gateway spells it', 'z-ai/glm-4.7-flash'],
+    ['a free id carrying the other providers’ marker', 'glm-4.7-flash:free'],
+    ['an unrecognised id', 'not-a-model'],
+  ])('refuses %s', (_label, model) => {
+    const plan = buildLlmRoutePlan(environmentWith({ [ZAI.modelVariable]: model }));
+    const entry = eligibilityFor(plan, 'zai');
+
+    expect(entry.eligible).toBe(false);
+    expect(entry.ineligibleReason).toBe('model_not_in_free_allowlist');
+    // Reported verbatim, so an operator can see WHICH id was refused.
+    expect(entry.model).toBe(model);
+    expect(plan.routes.map((route) => route.routeId)).not.toContain('zai');
+  });
+
+  it('refuses the model the fixture configures, so the suite runs against the trap', () => {
+    // Not a restatement of the table above: it pins the DEFAULT state of every
+    // other test in this repository. If the fixture were ever changed to an
+    // allowlisted id, route 5 would quietly become callable in dozens of tests.
+    expect(FIXTURE_LLM_ENV[ZAI.modelVariable]).toBe('glm-4.7-flashx');
+    expect(eligibilityFor(buildLlmRoutePlan(FIXTURE_LLM_ENV), 'zai').ineligibleReason).toBe(
+      'model_not_in_free_allowlist',
+    );
+  });
+
+  it('names the rule that refused, distinguishing the two bases in the verdict', () => {
+    // The two refusals are different facts and lead to different operator
+    // actions, so they must not share one reason string.
+    const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
+
+    expect(eligibilityFor(plan, 'gemini').ineligibleReason).toBe('model_not_marked_no_charge');
+    expect(eligibilityFor(plan, 'zai').ineligibleReason).toBe('model_not_in_free_allowlist');
+  });
+
+  it('does NOT teach the marker rule that a flash model is free', () => {
+    // The counterexample that proves the allowlist was added INSTEAD OF widening
+    // the marker. If `isNoChargeModelId` had learned `-flash`, every one of
+    // these would be true and routes 1 to 4 would have been opened up with it.
+    for (const model of ['glm-4.7-flash', 'glm-4.5-flash', 'foo-flash', 'glm-4.7-flashx']) {
+      expect(isNoChargeModelId(model), model).toBe(false);
+    }
+    // And the marker rule still decides the marker routes, unchanged.
+    expect(isNoChargeModelId('vendor/model-a-free')).toBe(true);
+  });
+
+  it('keeps the two rules bound to their own routes', () => {
+    // A free-marker id must not become callable on the allowlist route, and an
+    // allowlisted id must not become callable on a marker route. Each rule
+    // governs the routes it was approved for and no others.
+    expect(isNoChargeRouteModel('zai', 'glm-4.7-flash')).toBe(true);
+    expect(isNoChargeRouteModel('zai', 'vendor/model-a-free')).toBe(false);
+    expect(isNoChargeRouteModel('tokenrouter', 'vendor/model-a-free')).toBe(true);
+    expect(isNoChargeRouteModel('tokenrouter', 'glm-4.7-flash')).toBe(false);
+  });
+
+  it('folds case and surrounding whitespace without widening the set', () => {
+    expect(isModelInFreeAllowlist('  glm-4.7-flash  ', ZAI_FREE_MODEL_ALLOWLIST)).toBe(true);
+    expect(isModelInFreeAllowlist('GLM-4.7-Flash', ZAI_FREE_MODEL_ALLOWLIST)).toBe(true);
+    // Still exact equality against a fixed list: folding decides nothing else.
+    expect(isModelInFreeAllowlist('glm-4.7-flashx', ZAI_FREE_MODEL_ALLOWLIST)).toBe(false);
+    expect(isModelInFreeAllowlist('', ZAI_FREE_MODEL_ALLOWLIST)).toBe(false);
+    expect(isModelInFreeAllowlist('   ', ZAI_FREE_MODEL_ALLOWLIST)).toBe(false);
+  });
+
+  it('admits nothing when the allowlist is empty, rather than everything', () => {
+    // The fail-closed direction of the same function. An allowlist route whose
+    // list went missing must become unusable, not unguarded.
+    expect(isModelInFreeAllowlist('glm-4.7-flash', [])).toBe(false);
+  });
+
+  it('admits nothing for a route this module never approved', () => {
+    // `isNoChargeRouteModel` resolves the basis from APPROVED_LLM_ROUTES, so an
+    // id nobody approved has no permissive default to fall back on.
+    expect(isNoChargeRouteModel('unknown-route' as LlmRouteId, 'glm-4.7-flash')).toBe(false);
+    expect(isNoChargeRouteModel('unknown-route' as LlmRouteId, 'vendor/model-a-free')).toBe(false);
+  });
+
+  it.each([
+    ['a plaintext endpoint', 'http://api.provider.invalid/v4'],
+    ['an endpoint carrying inline credentials', 'https://user:secret@api.provider.invalid/v4'],
+    ['a value that is not a URL at all', 'api.provider.invalid/v4'],
+  ])('fails closed on %s, before the model is even considered', (_label, baseUrl) => {
+    const plan = buildLlmRoutePlan(
+      environmentWith({
+        [ZAI.baseUrlVariable]: baseUrl,
+        // An ALLOWLISTED model, so the refusal can only be about the URL.
+        [ZAI.modelVariable]: 'glm-4.7-flash',
+      }),
+    );
+    const entry = eligibilityFor(plan, 'zai');
+
+    expect(entry.eligible).toBe(false);
+    expect(entry.ineligibleReason).toBe('base_url_not_acceptable');
+    // Withheld deliberately: a URL refused for carrying a credential must not be
+    // republished in the verdict that refused it.
+    expect(entry.baseUrl).toBeNull();
+    expect(plan.routes.map((route) => route.routeId)).not.toContain('zai');
+  });
+
+  it('never places the Z.ai credential in the eligibility record, eligible or not', () => {
+    const secret = fixtureValue(ZAI.apiKeyVariable);
+    const refused = buildLlmRoutePlan(FIXTURE_LLM_ENV);
+    const admitted = buildLlmRoutePlan(
+      environmentWith({ [ZAI.modelVariable]: 'glm-4.7-flash' }),
+    );
+
+    expect(secret.length).toBeGreaterThan(0);
+    expect(JSON.stringify(refused.eligibility).includes(secret)).toBe(false);
+    expect(JSON.stringify(admitted.eligibility).includes(secret)).toBe(false);
+    // Positive control for the scan: the credential IS in `routes`, where it
+    // legitimately lives, so the two assertions above are detecting something.
+    expect(JSON.stringify(admitted.routes).includes(secret)).toBe(true);
+    expect(routeFor(admitted, 'zai').apiKey).toBe(secret);
+  });
+
+  it.each([
+    ['base URL', ZAI.baseUrlVariable],
+    ['model', ZAI.modelVariable],
+    ['api key', ZAI.apiKeyVariable],
+  ])('refuses the route when its %s is unset, even with the others valid', (_label, variable) => {
+    const environment = environmentWithout(variable);
+    const plan = buildLlmRoutePlan({ ...environment, [ZAI.modelVariable]: 'glm-4.7-flash' });
+    const entry = eligibilityFor(plan, 'zai');
+
+    if (variable === ZAI.modelVariable) {
+      // The override above re-supplies the model, so this one case is eligible.
+      expect(entry.eligible).toBe(true);
+      return;
+    }
+    expect(entry.eligible).toBe(false);
+    expect(entry.ineligibleReason).toBe('missing_configuration');
+  });
+
+  it('keeps the cap and the refused paid path with the new route eligible', () => {
+    const plan = buildLlmRoutePlan(environmentWith({ [ZAI.modelVariable]: 'glm-4.7-flash' }));
+
+    expect(plan.approvedCostCapEur).toBe(0);
+    expect(plan.allowPaid).toBe(false);
+    expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v2');
+  });
+
+  it('cannot be switched to a paid model by any environment variable', () => {
+    // The cap's own property, restated over the new basis: asking for budget is
+    // refused before a single route is inspected, and an invented override does
+    // not widen the allowlist.
+    expect(() =>
+      buildLlmRoutePlan(
+        environmentWith({ [ZAI.modelVariable]: 'glm-4.7-flash', LLM_ALLOW_PAID: 'true' }),
+      ),
+    ).toThrow(LlmPaidPathError);
+
+    const invented = buildLlmRoutePlan(
+      environmentWith({
+        [ZAI.modelVariable]: 'glm-4.7',
+        ZAI_ALLOW_PAID_MODEL: 'true',
+        ZAI_FREE_MODEL_ALLOWLIST: 'glm-4.7',
+        LLM_FORCE_ROUTE: 'zai',
+      }),
+    );
+    expect(eligibilityFor(invented, 'zai').ineligibleReason).toBe('model_not_in_free_allowlist');
+    expect(invented.routes.map((route) => route.routeId)).not.toContain('zai');
+  });
+
+  it('leaves the four historical routes behaving exactly as before', () => {
+    // The whole point of appending rather than reworking: the plan the rest of
+    // the suite is read against is unchanged by this route's arrival.
+    const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
+
+    expect(plan.routes.map((route) => route.routeId)).toEqual([
+      'tokenrouter',
+      'opencode',
+      'openrouter',
+    ]);
+    expect(plan.routes.map((route) => route.order)).toEqual([1, 3, 4]);
+    for (const routeId of ['tokenrouter', 'opencode', 'openrouter'] as const) {
+      expect(eligibilityFor(plan, routeId).eligible, routeId).toBe(true);
+      expect(eligibilityFor(plan, routeId).noChargeBasis, routeId).toBe(
+        'provider_free_model_tier',
+      );
+    }
+    expect(eligibilityFor(plan, 'gemini').ineligibleReason).toBe('model_not_marked_no_charge');
   });
 });

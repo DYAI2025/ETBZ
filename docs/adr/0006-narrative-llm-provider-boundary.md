@@ -15,20 +15,30 @@ ETBZ-25B implements it, under a Product Owner contract whose binding condition
 is a **development billable LLM cost cap of `0.00 EUR` per synthetic run**, with
 no paid fallback and no autonomous provider, model or budget change.
 
-Four routes were approved, in preference order: TokenRouter, the Gemini
-OpenAI-compatible endpoint, OpenCode, OpenRouter.
+Four routes were approved initially, in preference order: TokenRouter, the
+Gemini OpenAI-compatible endpoint, OpenCode, OpenRouter. A fifth — the **direct
+Z.ai API** — was approved on 2026-09-12 for development evaluation, after all
+four earlier routes had failed to yield a Golden Reading at the real boundary.
+It is appended at order 5; the historical four keep their order, because
+reordering them is a separate product decision and not a consequence of adding
+a route.
 
 ## Decisions
 
 ### 1. One generic OpenAI-compatible adapter, no per-provider abstraction
 
-All four approved routes speak `POST {baseUrl}/chat/completions` with a bearer
+All approved routes speak `POST {baseUrl}/chat/completions` with a bearer
 credential. `src/adapters/llm/openai-compatible-client.ts` is therefore the
 entire provider surface. There is no provider subclass, no per-vendor mapper and
 no vendor name in any branch of it.
 
 The contract permits a provider-specific abstraction only when "a freshly
-verified provider contract makes that necessary". No such necessity was found.
+verified provider contract makes that necessary". No such necessity was found —
+including for Z.ai, whose documented endpoint is
+`POST https://api.z.ai/api/paas/v4/chat/completions` with `Authorization: Bearer`
+and `response_format: {"type":"json_object"}`, i.e. the shape this adapter
+already sends. Z.ai is therefore configuration behind the existing
+`NarrativeProvider` port, and there is no `ZaiNarrativeProvider`.
 
 ### 2. Approved routes are code; endpoints, models and credentials are config
 
@@ -42,10 +52,38 @@ hard-coded product truth".
 
 ### 3. No-charge eligibility is checked mechanically, and fails closed
 
-A route is eligible only when its configured model id carries the provider's
-own explicit zero-price marker (the id ends with `-free` or `:free`). A route
-whose no-charge status cannot be decided from the configuration it was given is
-**ineligible and skipped** — never "probably free".
+A route is eligible only when its configured model id satisfies the **basis that
+route was approved with**. A route whose no-charge status cannot be decided from
+the configuration it was given is **ineligible and skipped** — never "probably
+free".
+
+There are two bases, and `isNoChargeRouteModel` is the single decision point
+both the plan and the adapter's pre-call re-check go through:
+
+- `provider_free_model_tier` (routes 1–4): the id must END with `-free` or
+  `:free`.
+- `provider_exact_free_model_allowlist` (route 5, direct Z.ai): the id must be
+  EXACTLY one of a reviewed list held in `llm-routes.ts`.
+
+The second basis exists because Z.ai publishes a price of Free — input, cached
+input, cache storage and output — for ids that carry **no marker at all** and
+whose shape is indistinguishable from the paid models beside them on the same
+price table (verified 2026-09-12: `glm-4.7-flash` and `glm-4.5-flash` Free;
+`glm-4.7` $0.6/$2.2, `glm-4.7-flashx` $0.07/$0.4, `glm-4.5-air` $0.2/$1.1,
+`glm-4.5-airx` $1.1/$4.5 per million tokens).
+
+**The marker rule was NOT widened to cover them, and that is the decision.**
+Teaching `isNoChargeModelId` that `-flash` also means free would have authorised
+`glm-4.7-flashx` — a paid model one character away from a free one — along with
+every future id ending in those characters. The allowlist admits exact strings
+and nothing that resembles them, and `tests/support/llmNarrativeFixture.ts`
+configures route 5 with `glm-4.7-flashx` precisely so the suite runs against that
+trap rather than around it.
+
+An allowlist is a code-level fail-closed guard, **not a price readback**: it says
+a human reviewed an id as published-Free, not that the id is free right now. It
+therefore does not replace verifying the published price immediately before a
+run, and it cannot be widened from the environment.
 
 This is deliberately strict enough to exclude a provider whose free tier is real
 but is not expressed in the model id. The Gemini route is exactly that case, and
@@ -155,6 +193,38 @@ The live harness sets `low` explicitly for the controlled ETBZ-25B run — the
 approved free route's model documents `max` as its default when none is sent —
 and files it as `requestedReasoningEffort`: what was asked for, not a
 measurement of how the provider reasoned.
+
+### 11. Thinking mode is a second optional generic request field, not a spelling of the first
+
+`LlmChatRequest.thinkingMode` (`enabled | disabled`, closed by type and at
+runtime) is sent as `thinking: { type: <mode> }` only when set. Unset, the
+request is byte-for-byte what it was before the field existed, and
+`DEFAULT_LLM_NARRATIVE_OPTIONS` sets none.
+
+It is **not** `reasoning_effort` renamed. Some OpenAI-compatible endpoints take
+an effort LEVEL, others take an on/off OBJECT, and the direct Z.ai API documents
+both `reasoning_effort` and `thinking`. Reusing `reasoning_effort` for an
+endpoint that documents `thinking` would send a field that endpoint never agreed
+to read, and nobody has asked it what it does with an unknown one. The object
+form matters too: a bare string under the same key is a different field, and an
+endpoint reading `thinking.type` would see nothing.
+
+Like the effort, it belongs to the one generic adapter: no provider subclass, no
+model id in code. `src/adapters/llm/**` still names no model family, which
+`tests/unit/openai-compatible-client-reasoning-effort.test.ts` enforces by
+scanning both adapter sources for `/glm/i`.
+
+### 12. The route-plan version marks the mechanism, not just the list
+
+`planVersion` moves `etbz-25b.llm-route-plan.v1` → `v2`. Under v1, `eligible`
+meant exactly "the model id ends in a free marker". Under v2 it is a verdict
+from one of two rules, and the ineligibility vocabulary gained
+`model_not_in_free_allowlist`. A v1 and a v2 record can carry the same field set
+and state different things, which is what a version marker is for.
+
+`PROMPT_VERSION`, `INTERPRETATION_POLICY_VERSION` and `RUN_EVIDENCE_VERSION` are
+deliberately **unchanged**: this slice alters no prompt text, no interpretation
+policy and no evidence field meaning.
 
 ## Consequences
 

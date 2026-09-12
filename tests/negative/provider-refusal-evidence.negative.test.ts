@@ -419,6 +419,7 @@ describe('ETBZ-25B refusal R3: the record is bound to candidate SHA, brief hash 
       ['gemini', false],
       ['opencode', false],
       ['openrouter', false],
+      ['zai', false],
     ]);
   });
 

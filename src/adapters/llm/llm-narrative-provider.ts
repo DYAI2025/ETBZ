@@ -41,7 +41,7 @@
  *
  * The OBSERVATION is what a provider actually reported this call cost, and each
  * attempt records it as `reportedCost` — `null` when the provider reported
- * nothing, which is the ordinary case for three of the four approved routes.
+ * nothing, which is the ordinary case for four of the five approved routes.
  *
  * These used to be the same field. Every attempt wrote `billableCostEur: 0`,
  * sourced from the free-model MARKER in the model id, and a reader could not
@@ -53,7 +53,7 @@
  */
 
 import { structuralHashOfCanonicalText } from '../../domain/structural-hash.js';
-import { isNoChargeModelId } from '../../app/configuration/llm-routes.js';
+import { isNoChargeRouteModel } from '../../app/configuration/llm-routes.js';
 import type { LlmRouteConfig, LlmRoutePlan } from '../../app/configuration/llm-routes.js';
 import { NarrativeProviderError } from '../../application/interpretation/errors.js';
 import type {
@@ -74,6 +74,7 @@ import {
 } from './openai-compatible-client.js';
 import type {
   LlmReasoningEffort,
+  LlmThinkingMode,
   LlmUsage,
   ReportedCost,
   Transport,
@@ -163,6 +164,14 @@ export interface LlmNarrativeOptions {
    * that wants one says so, and its evidence records what it asked for.
    */
   readonly reasoningEffort?: LlmReasoningEffort;
+  /**
+   * An explicit thinking mode, passed through to the request only when set.
+   *
+   * Deliberately ABSENT from `DEFAULT_LLM_NARRATIVE_OPTIONS` for the same reason
+   * the effort is: the default run sends no `thinking` field, exactly as before
+   * this option existed. A caller that wants one says so.
+   */
+  readonly thinkingMode?: LlmThinkingMode;
 }
 
 export const DEFAULT_LLM_NARRATIVE_OPTIONS: LlmNarrativeOptions = {
@@ -271,10 +280,10 @@ export async function generateNarrativeFromPlan(
     // check that happens once at load time is a check that trusts every line of
     // code between load time and the call. This one sits on the last statement
     // before the credential goes out.
-    if (!isNoChargeModelId(route.model)) {
+    if (!isNoChargeRouteModel(route.routeId, route.model)) {
       throw new NarrativeProviderError(
         'PROVIDER_NO_ELIGIBLE_ROUTE',
-        `route "${route.routeId}" reached the call with model "${route.model}", which carries no zero-price marker; the 0.00 EUR cap refuses it`,
+        `route "${route.routeId}" reached the call with model "${route.model}", which its approved no-charge basis does not admit; the 0.00 EUR cap refuses it`,
         attempts,
         identity,
       );
@@ -295,6 +304,9 @@ export async function generateNarrativeFromPlan(
           ...(options.reasoningEffort === undefined
             ? {}
             : { reasoningEffort: options.reasoningEffort }),
+          ...(options.thinkingMode === undefined
+            ? {}
+            : { thinkingMode: options.thinkingMode }),
         },
         transport,
       );

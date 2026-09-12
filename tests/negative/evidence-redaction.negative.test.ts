@@ -295,10 +295,10 @@ describe('ETBZ-25B evidence: the baseline every case below mutates is a real, ga
     expect(accepted[0]?.responseId).not.toBeNull();
   });
 
-  it('declares all four approved credentials and the subject personal data it must refuse', () => {
+  it('declares all five approved credentials and the subject personal data it must refuse', () => {
     // Both lists are derived, not retyped. A silently empty derivation would
     // make every "is refused" case below pass for the wrong reason.
-    expect(CONFIGURED_SECRETS).toHaveLength(4);
+    expect(CONFIGURED_SECRETS).toHaveLength(5);
     expect(CONFIGURED_SECRETS.every((secret) => secret.length > 0)).toBe(true);
     expect(SUBJECT_PERSONAL_VALUES).toEqual(['Musterkundin A', '1990-06-15']);
   });

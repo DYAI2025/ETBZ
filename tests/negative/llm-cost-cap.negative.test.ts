@@ -275,7 +275,7 @@ describe('ETBZ-25B negative: buildLlmRoutePlan propagates the refusal', () => {
   it('positive control: the same environment yields a plan once the paid flag is "false"', () => {
     const plan = buildLlmRoutePlan(FIXTURE_LLM_ENV);
 
-    expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v1');
+    expect(plan.planVersion).toBe('etbz-25b.llm-route-plan.v2');
     expect(plan.approvedCostCapEur).toBe(0);
     expect(plan.allowPaid).toBe(false);
     expect(plan.routes.length).toBeGreaterThan(0);

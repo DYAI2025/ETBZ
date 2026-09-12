@@ -63,9 +63,10 @@ import { knownTimeModel } from '../support/narrativeFixture.js';
  * changes exactly one thing: the HTTP status, the `finish_reason`, or the
  * answer text. Nothing here needs a network, a credential or a model.
  *
- * A NOTE ON THE FIXTURE'S DELIBERATE GAP: `FIXTURE_LLM_ENV` configures all four
- * approved routes but gives `gemini` a model id with no zero-price marker, so
- * the cost gate refuses it. That makes "the NEXT ELIGIBLE route" a different
+ * A NOTE ON THE FIXTURE'S DELIBERATE GAP: `FIXTURE_LLM_ENV` configures all five
+ * approved routes but gives `gemini` a model id with no zero-price marker and
+ * `zai` one outside its reviewed exact free-model allowlist, so the cost gate
+ * refuses both. That makes "the NEXT ELIGIBLE route" a different
  * thing from "the next route", which is exactly the case a failover test should
  * be run against: route 1 must fail over to route 3, never to route 2.
  */
@@ -192,7 +193,13 @@ describe('ETBZ-25B F0: the premise these tests rest on', () => {
         routeId: entry.routeId,
         reason: entry.ineligibleReason,
       })),
-    ).toEqual([{ routeId: 'gemini', reason: 'model_not_marked_no_charge' }]);
+    ).toEqual([
+      { routeId: 'gemini', reason: 'model_not_marked_no_charge' },
+      // Refused by the OTHER rule, and listed here for that reason: the fixture
+      // exercises one route rejected for a missing marker and one rejected for
+      // being outside an exact allowlist.
+      { routeId: 'zai', reason: 'model_not_in_free_allowlist' },
+    ]);
   });
 
   it('pins the cost cap at zero with no paid path in the plan the runs below use', () => {

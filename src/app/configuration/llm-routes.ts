@@ -1,7 +1,7 @@
 /**
  * ETBZ-25B — the approved LLM route plan, and the guards that keep it free.
  *
- * The Product Owner approved FOUR development routes, in a fixed preference
+ * The Product Owner approved FIVE development routes, in a fixed preference
  * order, under one hard condition: the billable LLM cost of a synthetic run is
  * `0.00 EUR`. This module is where that condition becomes mechanical.
  *
@@ -21,6 +21,29 @@
  *                              under an explicit marker in the model id
  *                              (`…-free`, `…:free`). A configured model without
  *                              that marker is refused.
+ *
+ *   provider_exact_free_model_allowlist
+ *                              the provider publishes a price of Free for a
+ *                              SMALL SET OF NAMED ids that carry no marker at
+ *                              all, and whose names are indistinguishable in
+ *                              shape from the paid ids beside them. The marker
+ *                              rule cannot decide such an id either way, so the
+ *                              route is decided against a reviewed exact-id
+ *                              allowlist held in this module. A configured model
+ *                              outside that list is refused.
+ *
+ * THE MARKER RULE IS NOT WEAKENED BY THE SECOND BASIS, and this is the whole
+ * reason there are two. The tempting shortcut — teaching `isNoChargeModelId`
+ * that `-flash` also means free — would have authorised every present and
+ * future id ending in those characters, `glm-4.7-flashx` included, which is a
+ * PAID model. The allowlist is narrow by construction: it admits the exact
+ * strings a human reviewed and nothing that merely resembles them.
+ *
+ * AND AN ALLOWLIST IS NOT A PRICE READBACK. It is a code-level, fail-closed
+ * guard that an operator cannot widen from the environment; it says "a human
+ * reviewed this id as published-Free", not "this id is free right now". A
+ * provider is free to reprice, so the allowlist never replaces verifying the
+ * published price immediately before a run.
  *
  * A route whose no-charge status cannot be decided from the configuration it
  * was given is INELIGIBLE and is skipped — it is never "probably free". That is
@@ -43,10 +66,12 @@
 
 import type { EnvironmentRecord } from './config.js';
 
-export type LlmRouteId = 'tokenrouter' | 'gemini' | 'opencode' | 'openrouter';
+export type LlmRouteId = 'tokenrouter' | 'gemini' | 'opencode' | 'openrouter' | 'zai';
 
 /** The ways a route's zero price can be established from configuration alone. */
-export type NoChargeBasis = 'provider_free_model_tier';
+export type NoChargeBasis =
+  | 'provider_free_model_tier'
+  | 'provider_exact_free_model_allowlist';
 
 export interface ApprovedRouteDefinition {
   readonly routeId: LlmRouteId;
@@ -56,12 +81,37 @@ export interface ApprovedRouteDefinition {
   readonly modelVariable: string;
   readonly apiKeyVariable: string;
   readonly noChargeBasis: NoChargeBasis;
+  /**
+   * The exact model ids reviewed as published-Free for this route.
+   *
+   * Meaningful ONLY for `provider_exact_free_model_allowlist`, and absent for a
+   * marker-based route, whose eligibility is a property of the id's suffix
+   * rather than of a list. An allowlist-based route whose list is missing or
+   * empty admits nothing: the absence fails closed rather than opening the
+   * route up.
+   */
+  readonly freeModelAllowlist?: readonly string[];
   /** Why this basis is checkable for this provider. Published with evidence. */
   readonly statement: string;
 }
 
 /**
- * The four approved routes, in the Product Owner's order.
+ * The direct Z.ai model ids a human reviewed as published-Free.
+ *
+ * Both were read from the provider's own published price table on 2026-09-12,
+ * where each shows Free for input, cached input, cache storage AND output. The
+ * paid neighbours they must never be confused with are on the same page:
+ * `glm-4.7` at $0.6/$2.2, `glm-4.7-flashx` at $0.07/$0.4, `glm-4.5-air` at
+ * $0.2/$1.1 and `glm-4.5-airx` at $1.1/$4.5 per million tokens.
+ *
+ * Widening this list is a reviewed code change, which is the point: it is the
+ * one place where "this exact id costs nothing" is asserted, and an operator
+ * must not be able to assert it for themselves by exporting a variable.
+ */
+export const ZAI_FREE_MODEL_ALLOWLIST: readonly string[] = ['glm-4.7-flash', 'glm-4.5-flash'];
+
+/**
+ * The five approved routes, in the Product Owner's order.
  *
  * Adding a route here is the only way to widen the provider surface, and it is
  * a reviewed code change — exactly as a provider decision should be.
@@ -107,6 +157,17 @@ export const APPROVED_LLM_ROUTES: readonly ApprovedRouteDefinition[] = [
     statement:
       'OpenRouter publishes zero-price variants under the `:free` marker, and its model catalogue reports `pricing.prompt` and `pricing.completion` of "0" for exactly those ids.',
   },
+  {
+    routeId: 'zai',
+    order: 5,
+    baseUrlVariable: 'ZAI_BASE_URL',
+    modelVariable: 'ZAI_MODEL',
+    apiKeyVariable: 'ZAI_API_KEY',
+    noChargeBasis: 'provider_exact_free_model_allowlist',
+    freeModelAllowlist: ZAI_FREE_MODEL_ALLOWLIST,
+    statement:
+      'The direct Z.ai API publishes a price of Free — input, cached input, cache storage and output — for a small set of named models, and those ids carry NO marker: they are ordinary ids whose shape is indistinguishable from the paid models beside them on the same price table. The marker rule cannot decide them either way, so this route is decided against a reviewed exact-id allowlist instead. That allowlist is a code-level fail-closed guard, not a billing readback, and it does not replace verifying the published price immediately before a run.',
+  },
 ] as const;
 
 /**
@@ -123,11 +184,64 @@ export function isNoChargeModelId(modelId: string): boolean {
   return NO_CHARGE_MODEL_MARKER.test(modelId.trim());
 }
 
+/**
+ * True when the model id is EXACTLY one a human reviewed as published-Free.
+ *
+ * Equality, never containment: the ids this rule exists for sit one character
+ * away from paid models (`glm-4.7-flash` beside `glm-4.7-flashx`), so a prefix,
+ * suffix or substring test would admit the very models the cap must refuse.
+ *
+ * Case and surrounding whitespace are folded, for the same reason
+ * `isNoChargeModelId` folds them: an environment value carries whitespace, and a
+ * provider that publishes `glm-4.7-flash` names the same model when an operator
+ * types it capitalised. Folding case cannot widen the set — it is still exact
+ * equality against a fixed list — whereas leaving it out would refuse a
+ * correctly-named model for a reason nobody could see in the verdict.
+ */
+export function isModelInFreeAllowlist(
+  modelId: string,
+  allowlist: readonly string[],
+): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return false;
+  }
+  return allowlist.some((allowed) => allowed.trim().toLowerCase() === normalized);
+}
+
+/**
+ * Whether THIS route may be called with THIS model under the 0.00 EUR cap.
+ *
+ * The single decision point for no-charge eligibility, and the reason it takes a
+ * route id rather than a basis: the basis is looked up from
+ * `APPROVED_LLM_ROUTES`, which is code, so a caller cannot hand this function a
+ * more convenient basis than the one the route was approved with. The adapter's
+ * last check before a credential leaves the process calls exactly this, so the
+ * plan and the call agree by construction instead of by coincidence.
+ *
+ * An unknown route id admits nothing. A route this module has never approved is
+ * not a route with a permissive default.
+ */
+export function isNoChargeRouteModel(routeId: LlmRouteId, modelId: string): boolean {
+  const definition = APPROVED_LLM_ROUTES.find((candidate) => candidate.routeId === routeId);
+  if (definition === undefined) {
+    return false;
+  }
+  switch (definition.noChargeBasis) {
+    case 'provider_free_model_tier':
+      return isNoChargeModelId(modelId);
+    case 'provider_exact_free_model_allowlist':
+      return isModelInFreeAllowlist(modelId, definition.freeModelAllowlist ?? []);
+  }
+}
+
 export type RouteIneligibilityReason =
   /** The route's base URL, model or credential is not configured. */
   | 'missing_configuration'
   /** The configured model carries no zero-price marker: it may be billable. */
   | 'model_not_marked_no_charge'
+  /** The configured model is not one of this route's reviewed free model ids. */
+  | 'model_not_in_free_allowlist'
   /** The base URL is not a plain https endpoint, or carries inline credentials. */
   | 'base_url_not_acceptable';
 
@@ -192,7 +306,16 @@ export interface LlmRouteConfig {
 }
 
 export interface LlmRoutePlan {
-  readonly planVersion: 'etbz-25b.llm-route-plan.v1';
+  /**
+   * v2 — the approved route SET and the no-charge MECHANISM both changed.
+   *
+   * v1 had four routes and one basis, so "eligible" meant exactly "the model id
+   * ends in a free marker". v2 adds a fifth route decided against a reviewed
+   * exact-id allowlist, which makes `eligible` a verdict from one of two rules
+   * rather than from one. A v1 record and a v2 record can carry the same field
+   * set and mean different things, which is what the marker is for.
+   */
+  readonly planVersion: 'etbz-25b.llm-route-plan.v2';
   /** POLICY: the approved development cap. Not configurable in this slice. */
   readonly approvedCostCapEur: 0;
   readonly allowPaid: false;
@@ -323,12 +446,20 @@ export function buildLlmRoutePlan(
       continue;
     }
 
-    if (!isNoChargeModelId(model)) {
+    if (!isNoChargeRouteModel(definition.routeId, model)) {
       eligibility.push({
         routeId: definition.routeId,
         order: definition.order,
         eligible: false,
-        ineligibleReason: 'model_not_marked_no_charge',
+        // The reason NAMES THE RULE THAT REFUSED, because the two rules fail for
+        // different reasons and an operator's next action differs: a missing
+        // marker is usually a mis-typed model id, while an id outside the
+        // allowlist is a model nobody has reviewed as free — which may be a
+        // perfectly real model that simply costs money.
+        ineligibleReason:
+          definition.noChargeBasis === 'provider_exact_free_model_allowlist'
+            ? 'model_not_in_free_allowlist'
+            : 'model_not_marked_no_charge',
         baseUrl,
         model,
         noChargeBasis: definition.noChargeBasis,
@@ -362,7 +493,7 @@ export function buildLlmRoutePlan(
   }
 
   return {
-    planVersion: 'etbz-25b.llm-route-plan.v1',
+    planVersion: 'etbz-25b.llm-route-plan.v2',
     approvedCostCapEur: 0,
     allowPaid: false,
     eligibility,

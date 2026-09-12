@@ -4,7 +4,7 @@
  * The Product Owner contract is explicit: "Use one generic OpenAI-compatible
  * provider adapter where the current provider endpoint is OpenAI-compatible. Do
  * not create provider-specific domain abstractions unless a freshly verified
- * provider contract makes that necessary." All four approved routes speak
+ * provider contract makes that necessary." All five approved routes speak
  * `POST {baseUrl}/chat/completions` with a bearer credential, so this file is
  * the whole provider surface and there is no per-provider subclass anywhere.
  *
@@ -72,6 +72,33 @@ export type LlmErrorCode =
 export const LLM_REASONING_EFFORTS = ['low', 'high', 'max'] as const;
 
 export type LlmReasoningEffort = (typeof LLM_REASONING_EFFORTS)[number];
+
+/**
+ * Whether the model should think before answering, as a request field of its own.
+ *
+ * A SEPARATE FIELD FROM `reasoningEffort`, AND NOT A SPELLING OF IT. Some
+ * OpenAI-compatible endpoints take an effort LEVEL (`reasoning_effort`), others
+ * take an explicit on/off OBJECT (`thinking: { type }`), and at least one
+ * publishes both. Sending an effort level to an endpoint that documents the
+ * object is not a near miss — it is a field that endpoint never agreed to read,
+ * and nobody has asked it what it does with one.
+ *
+ * ABSENT BY DEFAULT, like the effort beside it. A request that sets no mode
+ * carries no `thinking` field at all, so no existing route's request changes by
+ * a single byte unless a caller asks for it.
+ *
+ * THIS IS TRANSPORT, NOT A PROVIDER ABSTRACTION. It is one optional key on the
+ * one generic request; there is no branch on a vendor, no model family named
+ * here, and no second client. Which routes need it is configuration's business.
+ *
+ * The two values are the closed set the field documents. They are refused at
+ * runtime as well as by the type, because a value arriving through a cast or a
+ * configuration string would otherwise be forwarded verbatim to a provider
+ * nobody has asked how it reads an unknown one.
+ */
+export const LLM_THINKING_MODES = ['enabled', 'disabled'] as const;
+
+export type LlmThinkingMode = (typeof LLM_THINKING_MODES)[number];
 
 /**
  * Transient status codes, enumerated. Anything absent here is TERMINAL.
@@ -204,6 +231,11 @@ export interface LlmChatRequest {
    * `LlmReasoningEffort`.
    */
   readonly reasoningEffort?: LlmReasoningEffort;
+  /**
+   * Sent as `thinking: { type: <mode> }` when set; not sent at all when absent.
+   * See `LlmThinkingMode`.
+   */
+  readonly thinkingMode?: LlmThinkingMode;
 }
 
 export interface Transport {
@@ -262,10 +294,12 @@ export interface ReportedCost {
 /**
  * Reads a per-request cost out of a provider `usage` block, if it has one.
  *
- * MEASURED, not assumed: of the four approved routes, only OpenRouter returns a
- * cost at all (`usage.cost`, unlabelled), and TokenRouter, OpenCode and the
- * Gemini OpenAI-compatible endpoint return none. So `null` is the ordinary
- * answer here and must stay distinguishable from a reported `0` forever.
+ * MEASURED, not assumed: of the five approved routes, only OpenRouter returns a
+ * cost at all (`usage.cost`, unlabelled). TokenRouter, OpenCode and the Gemini
+ * OpenAI-compatible endpoint return none, and the direct Z.ai endpoint was
+ * measured on 2026-09-12 to answer with a `usage` block carrying no cost field
+ * either. So `null` is the ordinary answer here and must stay distinguishable
+ * from a reported `0` forever.
  */
 /**
  * A reported amount, accepting the spellings gateways actually use.
@@ -693,6 +727,20 @@ export async function requestChatCompletion(
       );
     }
     payload['reasoning_effort'] = request.reasoningEffort;
+  }
+  if (request.thinkingMode !== undefined) {
+    // Refused before the deadline starts and before anything leaves the
+    // process, exactly like the effort above. The value itself is not repeated:
+    // it did not pass validation, so it is not something this module will echo.
+    if (!(LLM_THINKING_MODES as readonly string[]).includes(request.thinkingMode)) {
+      throw new TypeError(
+        `thinking mode must be one of ${LLM_THINKING_MODES.join(', ')}; no request was sent`,
+      );
+    }
+    // The OBJECT form, because that is what the field is: a bare string here
+    // would be a different field with the same name, and an endpoint that reads
+    // `thinking.type` would see nothing at all.
+    payload['thinking'] = { type: request.thinkingMode };
   }
   if (request.stream) {
     payload['stream'] = true;

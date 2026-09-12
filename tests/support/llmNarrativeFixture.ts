@@ -314,6 +314,16 @@ export const FIXTURE_LLM_ENV: Readonly<Record<string, string>> = {
   OPENROUTER_BASE_URL: 'https://provider.invalid/four/v1',
   OPENROUTER_MODEL: 'vendor/model-d:free',
   OPENROUTER_API_KEY: 'fixture-key-four',
+  // Route 5 is configured and DELIBERATELY INELIGIBLE, the same technique the
+  // gemini route above uses — and with a sharper model id. `glm-4.7-flashx` is a
+  // real, PAID Z.ai model whose name differs from the free `glm-4.7-flash` by
+  // one character, so the fixture itself encodes the counterexample the
+  // allowlist exists to refuse: a route whose id would pass any prefix,
+  // substring or "-flash means free" test is refused here by exact-id equality.
+  // The endpoint is fake; the model id is real because the trap is real.
+  ZAI_BASE_URL: 'https://provider.invalid/five/v1',
+  ZAI_MODEL: 'glm-4.7-flashx',
+  ZAI_API_KEY: 'fixture-key-five',
   LLM_ALLOW_PAID: 'false',
   LLM_PAID_COST_CAP_USD: '0',
 };

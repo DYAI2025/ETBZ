@@ -24,6 +24,7 @@
     "guards": "bash scripts/verify-guards.sh",
     "guards:etbz34": "node scripts/verify-etbz34-mutations.mjs",
     "guards:etbz30a": "node scripts/verify-etbz30a-mutations.mjs",
+    "guards:etbz30b": "node scripts/verify-etbz30b-mutations.mjs",
     "secret-scan": "bash scripts/secret-scan.sh",
     "deps:scan": "npm audit --audit-level=high --omit=dev",
     "build-dry-run": "bash scripts/build-dry-run.sh",
